@@ -1,0 +1,4 @@
+requests>=2.31
+pyyaml>=6.0
+# test-only
+pytest>=7.4

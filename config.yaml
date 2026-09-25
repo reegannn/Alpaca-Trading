@@ -1,0 +1,48 @@
+# All tunable limits for the paper swing-trading bot.
+# This file is protected: it is restored from origin/main at the start of every
+# run and may only change via a reviewed PR against main.
+#
+# NOTE: Alpaca base URLs are deliberately NOT configurable here. They are
+# hard-coded in lib/alpaca_client.py (paper trading only).
+
+universe:
+  # NYSEARCA is included because Alpaca's asset endpoint reports it as a
+  # distinct exchange value for many ETFs (see README "Spec deviations").
+  allowed_exchanges: [NYSE, NASDAQ, ARCA, NYSEARCA, AMEX, BATS]
+  min_price: 5.0
+  min_avg_dollar_volume_20d: 20000000
+  exclude_symbols_file: null        # optional extra exclusions (one symbol per line, '#' comments)
+  leveraged_etf_name_patterns: ["2X", "3X", "-1X", "-2X", "-3X", "ULTRA", "ULTRAPRO", "INVERSE", "LEVERAGED", "BULL", "BEAR", "SHORT", "VIX", "VOLATILITY"]
+  leveraged_etf_symbols: [TQQQ, SQQQ, SOXL, SOXS, UPRO, SPXU, SPXL, SPXS, TNA, TZA, LABU, LABD, FNGU, FNGD, NUGT, DUST, UVXY, SVXY, VXX, VIXY, TSLL, NVDL, SSO, SDS, QLD, QID]
+
+risk:
+  long_only: true
+  max_position_pct_equity: 0.10
+  risk_per_trade_pct_equity: 0.01
+  max_open_positions: 8
+  max_gross_exposure_pct_equity: 1.00   # no margin
+  max_sector_pct_equity: 0.30
+  max_new_entries_per_day: 2
+  daily_loss_circuit_breaker_pct: -0.02 # (equity - last_equity) / last_equity
+  earnings_blackout_trading_days: 3
+  min_reward_to_risk: 1.5
+  max_stop_distance_pct: 0.12
+  entry_limit_slippage_pct: 0.003
+  # No entries in the first / last N minutes of the regular session.
+  no_entry_minutes_after_open: 15
+  no_entry_minutes_before_close: 15
+
+holding:
+  max_hold_days: 10                    # trading days
+
+notifications:
+  slack_channel: "#alpaca-paper-bot"   # owner sets this; the ONLY channel the agent may post to
+
+data:
+  latest_feed: iex
+  bars_feed: sip
+  bars_adjustment: split               # split-adjusted daily bars for SMAs / dollar volume
+
+screen:
+  most_actives_top: 50                 # Alpaca allows 1-100
+  movers_top: 25                       # Alpaca allows 1-50 (gainers and losers each)
