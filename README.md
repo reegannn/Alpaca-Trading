@@ -100,17 +100,17 @@ Exit codes: `0` ok, `1` error, `2` refused by risk checks (`"refused": true` plu
 | `clock` | Market open/closed, next open/close, trading day?, today's session open/close. |
 | `status` | Equity, last equity, day P&L %, cash, buying power, gross exposure %, circuit breaker, entries today (from Alpaca), positions (qty, avg entry, unrealised P&L, days held), open orders. |
 | `screen [--extra SYM,SYM]` | Most-actives ∪ movers (gainers + losers) ∪ extras → universe filters → price, 20-day avg dollar volume, 1d/5d %, SMA20/50, % from 20-day high. |
-| `check SYMBOL` | Universe eligibility with pass/fail per filter. |
+| `check SYMBOL` | Universe eligibility with pass/fail per filter; a leveraged exclusion names the symbol-list entry or name pattern (and fund indicator) that matched. |
 | `bars SYMBOL [--days N]` | Daily SIP bars (default 60) through the previous session. |
 | `snapshot SYM[,SYM]` | Latest trade, quote, today's and previous daily bar (IEX). |
 | `news [--symbols SYM,SYM] [--hours N]` | Alpaca news: headline, summary, source, url, symbols, created_at. |
-| `enter SYMBOL --rationale "..." [--dry-run]` | Loads today's watchlist entry, runs **all** risk checks, sizes, submits one GTC bracket order. `--dry-run` prints the full decision and never submits. |
-| `close SYMBOL --reason time_stop\|thesis_broken\|manual\|risk` | Cancels all open orders for the symbol, waits for confirmation, then closes the position; records the reason for `reconcile`. Regular hours only. |
-| `stale` | Positions held ≥ `max_hold_days` trading days (also lists positions inside the earnings blackout). |
+| `enter SYMBOL --rationale "..." [--size-factor F] [--dry-run]` | Loads today's watchlist entry, runs **all** risk checks, sizes (scaled by `F`, 0 < F ≤ 1, after all caps), submits one GTC bracket order. `--dry-run` prints the full decision and never submits. |
+| `close SYMBOL --reason time_stop\|earnings_exit\|thesis_broken\|manual\|risk` | Cancels all open orders for the symbol, waits for confirmation, then closes the position; records the reason for `reconcile`. Regular hours only. |
+| `stale` | Positions to close now, each with a `reason`: `earnings_exit` (earnings date on or before the next trading day; takes precedence) or `time_stop` (held ≥ `max_hold_days` trading days). |
 | `cancel-stale-entries` | Cancels bot entry parents (`sw-` prefix) that are still completely unfilled. |
 | `reconcile` | Resolves every `open_trades.json` record: cancelled → removed; exited → `trades.csv` row (actual fill prices); flags untracked positions. |
 | `skip SYMBOL --lesson L-xxx` | Appends a lesson-blocked candidate to `skipped.csv`. |
-| `review --days N \| --all [--markdown]` | Portfolio / per-tag / per-source stats, exit reasons, equity vs SPY, skipped-trade evaluation, open positions. |
+| `review --days N \| --all [--markdown]` | Portfolio / per-tag / per-source / per-size-factor stats, exit reasons, equity vs SPY, skipped-trade evaluation, open positions. |
 
 ### Risk checks (`enter`)
 
@@ -120,7 +120,8 @@ history); symbol in today's valid watchlist; universe; no existing position/orde
 (+ pending entries) + 1 ≤ max; gross exposure; sector exposure; earnings blackout; stop < limit <
 target, stop distance, reward:risk; trigger met; qty ≥ 1 whole share.
 
-Sizing: `qty = floor(min(risk_per_trade × equity / (limit − stop), max_position_pct × equity / limit))`.
+Sizing: `qty = floor(min(risk_per_trade × equity / (limit − stop), max_position_pct × equity / limit) × size_factor)`,
+where `size_factor` (default 1) comes from `--size-factor` and can only shrink the position.
 Order: bracket, `side=buy`, `type=limit`, `limit = last × (1 + slippage)` rounded to the tick,
 `time_in_force=gtc`, `client_order_id = sw-YYYYMMDD-SYMBOL-<6 hex>`. Submission is never retried.
 
@@ -191,8 +192,30 @@ Differences from the original handoff, and why:
 14. **`start_run.sh` commits restorations.** If restoring protected paths changes anything, it is
     committed immediately ("Restore protected paths from main") so `finish_run.sh` can still commit
     `state/` only. It also sets a local git identity if none is configured (merges need one).
-15. **Leveraged-name patterns are case-insensitive substrings** as specified; this errs towards
-    exclusion (e.g. a company whose name contains "Ultra" is excluded).
+15. **Leveraged filter: whole words, funds only.** Name patterns match case-insensitive whole words
+    (letters, digits and `-` are word characters, so `SHORT` does not match "Short-Term" and
+    `ULTRA` does not match "Ultra-Short" or "Ultragenyx"), and only when the name contains a
+    `universe.fund_name_indicators` word (ETF, ETN, Fund, Trust, ProShares, Direxion, …). Common
+    stocks are excluded only via `leveraged_etf_symbols` (so "Ultra Clean Holdings" is allowed).
+    `ULTRASHORT` was added to the patterns because "UltraShort" is no longer caught by `ULTRA`/`SHORT`.
+    `check` reports the matching list entry or pattern and the fund indicator under
+    `checks.not_leveraged.matched`.
 16. **Skipped-trade evaluation** assumes entry at the trigger price and scans the skip-date bar plus
     up to `max_hold_days` following bars; unresolved skips are marked at the last close and flagged
     `complete: false` until the window has elapsed.
+17. **Earnings exit.** `stale` lists positions whose earnings date is on or before the next trading
+    day with reason `earnings_exit` (precedence over `time_stop`); the trade run closes them with
+    `close --reason earnings_exit`. `earnings_exit` is a valid `close` reason and `trades.csv`
+    `exit_reason` value (enum: `stop`, `target`, `time_stop`, `earnings_exit`, `thesis_broken`,
+    `manual`, `risk`, `unknown`). `unknown`/`n/a` earnings dates never trigger it.
+18. **`enter --size-factor F`** (0 < F ≤ 1; anything else, including NaN/inf, is rejected both by the
+    CLI and by a `size_factor` risk check). It multiplies the capped quantity before flooring, is
+    recorded in `open_trades.json` and in a new trailing `size_factor` column of `trades.csv`, and
+    is a grouping dimension (`by_size_factor`) in `review`. `reduce_size` lessons state their factor,
+    e.g. `Effect: reduce_size (0.5)`, and the trade routine passes the smallest applicable factor.
+19. **`trades.csv` header migration.** When a CSV's header differs from the current columns (e.g. the
+    `size_factor` column is new), the next append rewrites the file with the new header, keeping
+    existing values by column name; old rows are treated as `size_factor` 1 by `review`.
+20. **`routines/trade.md` changed** from the original verbatim text (step 4a closes with the reason
+    reported by `stale`; step 5 distinguishes filter lessons (`skip`) from reduce_size lessons
+    (`--size-factor`)).

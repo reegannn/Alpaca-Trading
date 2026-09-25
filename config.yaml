@@ -12,7 +12,11 @@ universe:
   min_price: 5.0
   min_avg_dollar_volume_20d: 20000000
   exclude_symbols_file: null        # optional extra exclusions (one symbol per line, '#' comments)
-  leveraged_etf_name_patterns: ["2X", "3X", "-1X", "-2X", "-3X", "ULTRA", "ULTRAPRO", "INVERSE", "LEVERAGED", "BULL", "BEAR", "SHORT", "VIX", "VOLATILITY"]
+  # Name patterns are matched as whole words (letters, digits and '-' are word
+  # characters) and ONLY against fund names, i.e. names containing one of
+  # fund_name_indicators. Common stocks are excluded only via leveraged_etf_symbols.
+  leveraged_etf_name_patterns: ["2X", "3X", "-1X", "-2X", "-3X", "ULTRA", "ULTRAPRO", "ULTRASHORT", "INVERSE", "LEVERAGED", "BULL", "BEAR", "SHORT", "VIX", "VOLATILITY"]
+  fund_name_indicators: [ETF, ETFS, ETN, ETNS, ETP, FUND, TRUST, PROSHARES, DIREXION, ISHARES, SPDR, INVESCO, VANECK, WISDOMTREE, "GLOBAL X", GRANITESHARES, "LEVERAGE SHARES", "T-REX", TRADR, DEFIANCE, "VOLATILITY SHARES", MICROSECTORS, IPATH, AXS, ROUNDHILL, YIELDMAX]
   leveraged_etf_symbols: [TQQQ, SQQQ, SOXL, SOXS, UPRO, SPXU, SPXL, SPXS, TNA, TZA, LABU, LABD, FNGU, FNGD, NUGT, DUST, UVXY, SVXY, VXX, VIXY, TSLL, NVDL, SSO, SDS, QLD, QID]
 
 risk:

@@ -15,7 +15,7 @@ from conftest import (TODAY, candidate, daily_bars, ny, utc, watchlist_data,
                       weekday_calendar_rows)
 from lib.market_calendar import TradingCalendar
 from lib.risk import (EntryContext, build_bracket_order, check_close, circuit_breaker,
-                      count_entries_today, evaluate_entry)
+                      count_entries_today, earnings_exit_due, evaluate_entry)
 from lib.universe import UniverseResult
 from lib.watchlist import validate_watchlist
 
@@ -296,6 +296,45 @@ def test_all_failures_reported(config: dict[str, Any]) -> None:
             "max_open_positions", "trigger"} <= failed
 
 
+# ------------------------------------------------------------ size factor
+
+def test_size_factor_scales_after_caps(config: dict[str, Any]) -> None:
+    d = evaluate_entry(make_ctx(size_factor=0.5), config)
+    assert d.passed, d.failures
+    assert d.qty == 50                      # cap-limited 100 shares x 0.5
+    assert d.metrics["notional"] == 5000.0  # exposure checks use the reduced size
+
+
+@pytest.mark.parametrize("factor", [0.0, -0.5, 1.01, 2.0, float("nan"), float("inf")])
+def test_invalid_size_factor_refused(config: dict[str, Any], factor: float) -> None:
+    d = evaluate_entry(make_ctx(size_factor=factor), config)
+    assert "size_factor" in checks_failed(d)
+    assert not d.passed
+
+
+def test_size_factor_below_one_share_refused(config: dict[str, Any]) -> None:
+    d = evaluate_entry(make_ctx(size_factor=0.001), config)   # floor(100 x 0.001) = 0
+    assert "sizing" in checks_failed(d)
+
+
+# ------------------------------------------------------------ earnings exit
+
+@pytest.mark.parametrize("today,earnings,due", [
+    (TODAY, date(2026, 9, 29), True),          # Monday; earnings on the next trading day
+    (TODAY, date(2026, 9, 28), True),          # earnings today
+    (TODAY, date(2026, 9, 25), True),          # already past
+    (TODAY, date(2026, 9, 30), False),         # two trading days away
+    (date(2026, 10, 2), date(2026, 10, 5), True),   # Friday -> Monday
+    (date(2026, 10, 2), date(2026, 10, 6), False),
+    (TODAY, "2026-09-29", True),               # stored as a string in open_trades.json
+    (TODAY, "unknown", False),
+    (TODAY, "n/a", False),
+    (TODAY, None, False),
+])
+def test_earnings_exit_due(today: date, earnings: Any, due: bool) -> None:
+    assert earnings_exit_due(earnings, today, CAL) is due
+
+
 # ------------------------------------------------------------ order + close
 
 def test_bracket_order_shape(config: dict[str, Any]) -> None:
@@ -374,7 +413,7 @@ def test_dry_run_never_submits(tmp_path: Path, config: dict[str, Any]) -> None:
     import trader
     client = FakeClient()
     app = _app(tmp_path, config, client)
-    out = trader.cmd_enter(app, argparse.Namespace(symbol="XYZ", rationale="trigger met", dry_run=True))
+    out = trader.cmd_enter(app, argparse.Namespace(symbol="XYZ", rationale="trigger met", dry_run=True, size_factor=1.0))
     assert out["would_submit"] is True
     assert client.submitted == []
     assert app.state.load_open_trades() == {}
@@ -384,7 +423,7 @@ def test_enter_submits_once_and_records(tmp_path: Path, config: dict[str, Any]) 
     import trader
     client = FakeClient()
     app = _app(tmp_path, config, client)
-    trader.cmd_enter(app, argparse.Namespace(symbol="XYZ", rationale="trigger met", dry_run=False))
+    trader.cmd_enter(app, argparse.Namespace(symbol="XYZ", rationale="trigger met", dry_run=False, size_factor=1.0))
     assert len(client.submitted) == 1
     order = client.submitted[0]
     assert order["client_order_id"].startswith("sw-20260928-XYZ-")
@@ -398,7 +437,7 @@ def test_enter_refused_does_not_submit(tmp_path: Path, config: dict[str, Any]) -
     app = _app(tmp_path, config, client)
     app.now = ny(TODAY, 9, 35)   # inside the opening buffer
     with pytest.raises(trader.Refused):
-        trader.cmd_enter(app, argparse.Namespace(symbol="XYZ", rationale="x", dry_run=False))
+        trader.cmd_enter(app, argparse.Namespace(symbol="XYZ", rationale="x", dry_run=False, size_factor=1.0))
     assert client.submitted == []
 
 
@@ -413,6 +452,48 @@ def test_submit_error_not_retried(tmp_path: Path, config: dict[str, Any]) -> Non
     client = Failing()
     app = _app(tmp_path, config, client)
     with pytest.raises(trader.CommandError):
-        trader.cmd_enter(app, argparse.Namespace(symbol="XYZ", rationale="x", dry_run=False))
+        trader.cmd_enter(app, argparse.Namespace(symbol="XYZ", rationale="x", dry_run=False, size_factor=1.0))
     assert len(client.submitted) == 1
     assert app.state.load_open_trades() == {}
+
+
+def test_enter_with_size_factor_records_it(tmp_path: Path, config: dict[str, Any]) -> None:
+    import trader
+    client = FakeClient()
+    app = _app(tmp_path, config, client)
+    trader.cmd_enter(app, argparse.Namespace(symbol="XYZ", rationale="L-001 applies",
+                                             dry_run=False, size_factor=0.5))
+    order = client.submitted[0]
+    assert order["qty"] == "50"
+    assert app.state.load_open_trades()[order["client_order_id"]]["size_factor"] == 0.5
+
+
+@pytest.mark.parametrize("factor", [0.0, 1.5, float("nan")])
+def test_enter_rejects_invalid_size_factor(tmp_path: Path, config: dict[str, Any], factor: float) -> None:
+    import trader
+    client = FakeClient()
+    app = _app(tmp_path, config, client)
+    with pytest.raises(trader.CommandError):
+        trader.cmd_enter(app, argparse.Namespace(symbol="XYZ", rationale="x",
+                                                 dry_run=False, size_factor=factor))
+    assert client.submitted == []
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "1.2", "nan", "abc"])
+def test_cli_rejects_invalid_size_factor(value: str) -> None:
+    import trader
+    with pytest.raises(trader.UsageError):
+        trader.build_parser().parse_args(["enter", "XYZ", "--rationale", "x", "--size-factor", value])
+
+
+def test_cli_accepts_size_factor() -> None:
+    import trader
+    args = trader.build_parser().parse_args(["enter", "XYZ", "--rationale", "x", "--size-factor", "0.5"])
+    assert args.size_factor == 0.5
+    assert trader.build_parser().parse_args(["enter", "XYZ", "--rationale", "x"]).size_factor == 1.0
+
+
+def test_earnings_exit_is_a_close_reason() -> None:
+    import trader
+    args = trader.build_parser().parse_args(["close", "XYZ", "--reason", "earnings_exit"])
+    assert args.reason == "earnings_exit"

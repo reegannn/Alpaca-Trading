@@ -17,6 +17,7 @@ TRADES_COLUMNS = [
     "client_order_id", "symbol", "sector", "setup_tag", "idea_source",
     "entry_time", "entry_price", "qty", "stop", "target", "exit_time",
     "exit_price", "exit_reason", "r_multiple", "pnl", "days_held", "rationale",
+    "size_factor",
 ]
 
 SKIPPED_COLUMNS = [
@@ -26,8 +27,9 @@ SKIPPED_COLUMNS = [
 
 RUN_LOG_COLUMNS = ["timestamp", "subcommand", "args", "ok", "result"]
 
-EXIT_REASONS = {"stop", "target", "time_stop", "thesis_broken", "manual", "risk", "unknown"}
-CLOSE_REASONS = ("time_stop", "thesis_broken", "manual", "risk")
+EXIT_REASONS = {"stop", "target", "time_stop", "earnings_exit", "thesis_broken", "manual",
+                "risk", "unknown"}
+CLOSE_REASONS = ("time_stop", "earnings_exit", "thesis_broken", "manual", "risk")
 
 
 def load_config(path: Path) -> dict[str, Any]:
@@ -105,11 +107,33 @@ class StateStore:
     def append_csv(path: Path, columns: list[str], row: dict[str, Any]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         new_file = not path.exists() or path.stat().st_size == 0
+        if not new_file:
+            StateStore._migrate_header(path, columns)
         with path.open("a", newline="", encoding="utf-8") as fh:
             writer = csv.DictWriter(fh, fieldnames=columns, extrasaction="ignore")
             if new_file:
                 writer.writeheader()
             writer.writerow({c: _csv_value(row.get(c)) for c in columns})
+
+    @staticmethod
+    def _migrate_header(path: Path, columns: list[str]) -> None:
+        """Rewrite a CSV whose header differs from ``columns`` (e.g. a new column was added).
+
+        Existing values are kept by column name; new columns are left empty.
+        """
+        with path.open("r", newline="", encoding="utf-8") as fh:
+            reader = csv.DictReader(fh)
+            header = reader.fieldnames or []
+            if header == columns:
+                return
+            rows = list(reader)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        with tmp.open("w", newline="", encoding="utf-8") as fh:
+            writer = csv.DictWriter(fh, fieldnames=columns, extrasaction="ignore")
+            writer.writeheader()
+            for r in rows:
+                writer.writerow({c: r.get(c, "") or "" for c in columns})
+        tmp.replace(path)
 
     def read_trades(self) -> list[dict[str, str]]:
         return self.read_csv(self.trades_csv)

@@ -1,7 +1,10 @@
 """Position sizing. Whole shares only (Alpaca bracket orders reject fractional qty).
 
 qty = floor(min(risk_per_trade * equity / (limit - stop),
-                max_position_pct * equity / limit))
+                max_position_pct * equity / limit) * size_factor)
+
+``size_factor`` (0 < F <= 1, default 1) can only shrink a position. It is applied
+after all caps, so it can never raise the size above what the limits allow.
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ class SizingResult:
     cap_qty: float | None
     binding: str | None          # "risk" | "position_cap" | None
     reason: str | None = None    # set when qty < 1
+    size_factor: float = 1.0
 
     @property
     def ok(self) -> bool:
@@ -26,7 +30,8 @@ class SizingResult:
 
     def to_dict(self) -> dict[str, Any]:
         return {"qty": self.qty, "risk_qty": self.risk_qty, "cap_qty": self.cap_qty,
-                "binding": self.binding, "reason": self.reason}
+                "binding": self.binding, "reason": self.reason,
+                "size_factor": self.size_factor}
 
 
 def round_to_tick(price: float) -> float:
@@ -39,8 +44,17 @@ def entry_limit_price(last_price: float, slippage_pct: float) -> float:
     return round_to_tick(last_price * (1.0 + slippage_pct))
 
 
+def valid_size_factor(value: Any) -> bool:
+    """True only for a real number with 0 < value <= 1 (rejects NaN, inf, bools)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return 0.0 < float(value) <= 1.0
+
+
 def size_position(equity: float, limit_price: float, stop_price: float,
-                  risk_cfg: dict[str, Any]) -> SizingResult:
+                  risk_cfg: dict[str, Any], size_factor: float = 1.0) -> SizingResult:
+    if not valid_size_factor(size_factor):
+        return SizingResult(0, None, None, None, "size_factor must satisfy 0 < F <= 1")
     risk_pct = float(risk_cfg["risk_per_trade_pct_equity"])
     cap_pct = float(risk_cfg["max_position_pct_equity"])
     if equity <= 0:
@@ -53,7 +67,9 @@ def size_position(equity: float, limit_price: float, stop_price: float,
     risk_qty = risk_pct * equity / per_share_risk
     cap_qty = cap_pct * equity / limit_price
     binding = "risk" if risk_qty <= cap_qty else "position_cap"
-    # Small epsilon guards against float artefacts like 9.999999999 -> 9.
-    qty = int(math.floor(min(risk_qty, cap_qty) + 1e-9))
+    # size_factor is applied after both caps. Small epsilon guards against
+    # float artefacts like 9.999999999 -> 9.
+    qty = int(math.floor(min(risk_qty, cap_qty) * float(size_factor) + 1e-9))
     reason = None if qty >= 1 else "computed quantity is below 1 whole share"
-    return SizingResult(max(qty, 0), round(risk_qty, 4), round(cap_qty, 4), binding, reason)
+    return SizingResult(max(qty, 0), round(risk_qty, 4), round(cap_qty, 4), binding, reason,
+                        float(size_factor))
