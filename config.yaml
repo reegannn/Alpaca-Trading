@@ -39,8 +39,8 @@ risk:
 holding:
   max_hold_days: 10                    # trading days
 
-notifications:
-  slack_channel: "#alpaca-paper-bot"   # owner sets this; the ONLY channel the agent may post to
+# Slack: the destination channel ID is deliberately NOT stored in this repo. It lives
+# only in each routine's instructions (see routines/*.md and CLAUDE.md "Slack summaries").
 
 data:
   latest_feed: iex

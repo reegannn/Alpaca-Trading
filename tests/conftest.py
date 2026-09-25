@@ -68,7 +68,6 @@ BASE_CONFIG: dict[str, Any] = {
         "no_entry_minutes_before_close": 15,
     },
     "holding": {"max_hold_days": 10},
-    "notifications": {"slack_channel": "#alpaca-paper-bot"},
     "data": {"latest_feed": "iex", "bars_feed": "sip", "bars_adjustment": "split"},
 }
 

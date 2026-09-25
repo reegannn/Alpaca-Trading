@@ -15,3 +15,5 @@ Trading run for the paper swing-trading bot. Do not browse the web in this run.
 7. Run `bash scripts/finish_run.sh "trade <today> <time>"`.
 
 Final step (always): post the Trade summary to Slack exactly as described under "Slack summaries" in CLAUDE.md.
+
+Slack: post the run summary ONLY to channel ID <SLACK_CHANNEL_ID>. Never post to any other channel or user.

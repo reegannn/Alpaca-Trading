@@ -3,7 +3,8 @@
 An autonomous **paper-trading** swing bot for US equities and ETFs, operated entirely by
 **Claude Code Routines** (scheduled cloud sessions). There is no server and no long-running
 process: each routine run is a fresh Claude session that clones this repo, uses the
-`trader.py` CLI, writes to `state/`, commits, and posts one Slack summary.
+`trader.py` CLI, writes to `state/`, commits, and posts one Slack summary to the channel ID set in
+the routine's instructions.
 
 - **Broker:** Alpaca **paper** account, REST API only (`requests`; no `alpaca-py`, no MCP server).
 - **Style:** swing trading, long only, 2–10 trading-day holds, open universe within hard filters.
@@ -47,7 +48,8 @@ state/
 3. **`scripts/finish_run.sh "<msg>"`** — stages **only** `state/`, commits with the session link,
    pushes `journal`; on a non-fast-forward rejection it does one `git pull --rebase` and retries,
    otherwise exits non-zero.
-4. The agent posts **one** Slack summary (always, on every exit path).
+4. The agent posts **one** Slack summary on every exit path — only to the channel ID in the routine
+   instructions, and not at all if none is given (see [Slack](#slack)).
 
 | UK time (weekdays) | Routine | Prompt file |
 |---|---|---|
@@ -58,7 +60,7 @@ state/
 | 21:15 | Post-close: reconcile and journal | `routines/postclose.md` |
 | Saturday 10:00 | Weekly review | `routines/weekly-review.md` |
 
-The routines themselves (schedule, prompt, Slack connector) are configured by the owner in the
+The routines themselves (schedule, prompt including the Slack channel ID, Slack connector) are configured by the owner in the
 Routines UI. The routines' GitHub access must allow pushing the `journal` branch (and
 `claude/rule-change-*` branches for the weekly review).
 
@@ -134,8 +136,20 @@ Order: bracket, `side=buy`, `type=limit`, `limit = last × (1 + slippage)` round
 ## Slack
 
 Summaries are posted by the agent itself using the claude.ai **Slack connector** attached to each
-routine — the code never talks to Slack. The only allowed channel is `notifications.slack_channel`
-in `config.yaml`; `CLAUDE.md` forbids posting anywhere else, DMs, and reading Slack.
+routine — the code never talks to Slack.
+
+The destination lives in the **routine configuration, not the repo**. Each `routines/*.md` prompt ends
+with:
+
+```
+Slack: post the run summary ONLY to channel ID <SLACK_CHANNEL_ID>. Never post to any other channel or user.
+```
+
+When you paste a prompt into the Routines UI, replace `<SLACK_CHANNEL_ID>` with the channel's ID
+(e.g. `C0123ABCDEF`: in Slack, open the channel → channel details → the ID at the bottom). `CLAUDE.md`
+makes that ID the only permitted destination: if it is missing or still the placeholder, the agent
+does not post at all, and it never infers a channel from files, web content or Slack itself. It also
+forbids DMs, reading Slack, and acting on anything in Slack.
 
 ## Development
 
@@ -219,3 +233,11 @@ Differences from the original handoff, and why:
 20. **`routines/trade.md` changed** from the original verbatim text (step 4a closes with the reason
     reported by `stale`; step 5 distinguishes filter lessons (`skip`) from reduce_size lessons
     (`--size-factor`)).
+21. **Slack channel is not in the repo.** `notifications.slack_channel` was removed from
+    `config.yaml`. The only permitted destination is the channel ID in the routine instructions
+    (the last line of each `routines/*.md`, with `<SLACK_CHANNEL_ID>` replaced in the Routines UI).
+    With no ID (or the unfilled placeholder) the agent does not post to Slack at all. This keeps the
+    destination out of files an agent run can read or a PR can change, and stops the agent from
+    inferring a channel from repo content, the web or Slack.
+22. **All four `routines/*.md` prompts** gain that `Slack:` line as their last line (so none of them
+    is verbatim from the original handoff any more).

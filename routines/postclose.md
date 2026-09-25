@@ -7,3 +7,5 @@ Post-close run for the paper swing-trading bot. Do not place new entries.
 5. Run `bash scripts/finish_run.sh "postclose <today>"`.
 
 Final step (always): post the Post-close summary to Slack exactly as described under "Slack summaries" in CLAUDE.md.
+
+Slack: post the run summary ONLY to channel ID <SLACK_CHANNEL_ID>. Never post to any other channel or user.
