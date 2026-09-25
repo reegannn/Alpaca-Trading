@@ -34,7 +34,15 @@ FINAL_ORDER_STATUSES = {"canceled", "expired", "rejected", "filled", "done_for_d
 
 
 class CommandError(Exception):
-    """A handled failure; the message is shown to the operator."""
+    """A handled failure; the message is shown to the operator.
+
+    ``payload`` (optional) is merged into the JSON error output, e.g. the
+    per-symbol results of a partially failed `protect`.
+    """
+
+    def __init__(self, message: str, payload: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.payload = payload or {}
 
 
 class UsageError(Exception):
@@ -98,6 +106,21 @@ class App:
 
     def latest_feed(self) -> str:
         return str(self.config.get("data", {}).get("latest_feed", "iex"))
+
+    @property
+    def mode(self) -> str:
+        from lib.orders import order_mode
+        return order_mode(self.config)
+
+    @property
+    def fractional(self) -> bool:
+        return self.mode == "fractional"
+
+    def fills_since_midnight(self) -> list[dict[str, Any]]:
+        """Today's FILL activities (New York date)."""
+        from lib.market_calendar import NY, utc_iso
+        midnight = datetime.combine(self.today, datetime.min.time(), NY)
+        return self.client.get_fill_activities(after=utc_iso(midnight - timedelta(seconds=1)))
 
 
 # ------------------------------------------------------------------- helpers
@@ -189,7 +212,7 @@ def cmd_clock(app: App, args: argparse.Namespace) -> dict[str, Any]:
 
 def cmd_status(app: App, args: argparse.Namespace) -> dict[str, Any]:
     from lib.market_calendar import utc_iso, NY
-    from lib.risk import circuit_breaker, count_entries_today
+    from lib.risk import circuit_breaker, count_entries_today, settled_cash_available
     account = app.client.get_account()
     positions = app.client.get_positions()
     open_orders = app.client.list_orders(status="open", nested=False)
@@ -202,7 +225,11 @@ def cmd_status(app: App, args: argparse.Namespace) -> dict[str, Any]:
     last_equity = _f(account.get("last_equity"))
     active, day_pct = circuit_breaker(account, app.config["risk"])
     gross = sum(abs(_f(p.get("market_value")) or 0.0) for p in positions)
+    simulate = bool(app.config["risk"].get("simulate_cash_account"))
+    settled = (settled_cash_available(account, app.fills_since_midnight(), open_orders, app.today)
+               if simulate else None)
     return {
+        "order_mode": app.mode,
         "market_open": bool(clock.get("is_open")),
         "equity": equity,
         "last_equity": last_equity,
@@ -210,6 +237,8 @@ def cmd_status(app: App, args: argparse.Namespace) -> dict[str, Any]:
         "day_pnl_pct": None if day_pct is None else round(day_pct * 100, 3),
         "cash": _f(account.get("cash")),
         "buying_power": _f(account.get("buying_power")),
+        "simulate_cash_account": simulate,
+        "settled_cash_available": None if settled is None else round(settled, 2),
         "gross_exposure": round(gross, 2),
         "gross_exposure_pct_equity": round(gross / equity * 100, 2) if equity else None,
         "circuit_breaker_active": active,
@@ -260,7 +289,8 @@ def cmd_screen(app: App, args: argparse.Namespace) -> dict[str, Any]:
     exclusions = load_exclusions(ucfg, REPO_ROOT)
     eligible_syms: list[str] = []
     for sym, asset in assets.items():
-        res = check_universe(sym, asset, bars.get(sym, []), ucfg, exclusions)
+        res = check_universe(sym, asset, bars.get(sym, []), ucfg, exclusions,
+                             require_fractionable=app.fractional)
         if res.eligible:
             eligible_syms.append(sym)
         else:
@@ -287,8 +317,11 @@ def cmd_check(app: App, args: argparse.Namespace) -> dict[str, Any]:
     asset = app.client.get_asset(sym)
     bars = app.daily_bars([sym], 60).get(sym, [])
     res = check_universe(sym, asset, bars, app.config["universe"],
-                         load_exclusions(app.config["universe"], REPO_ROOT))
+                         load_exclusions(app.config["universe"], REPO_ROOT),
+                         require_fractionable=app.fractional)
     out = res.to_dict()
+    out["order_mode"] = app.mode
+    out["fractionable"] = (asset or {}).get("fractionable")
     out["name"] = (asset or {}).get("name")
     out["exchange"] = (asset or {}).get("exchange")
     out["metrics"] = screen_metrics(bars, None)
@@ -337,8 +370,7 @@ def cmd_news(app: App, args: argparse.Namespace) -> dict[str, Any]:
 
 def cmd_enter(app: App, args: argparse.Namespace) -> dict[str, Any]:
     from lib.market_calendar import NY, parse_date, utc_iso
-    from lib.risk import (EntryContext, build_bracket_order, evaluate_entry,
-                          new_client_order_id)
+    from lib.risk import EntryContext, build_entry_order, evaluate_entry, new_client_order_id
     from lib.sizing import valid_size_factor
     from lib.universe import check_universe, load_exclusions
 
@@ -364,6 +396,7 @@ def cmd_enter(app: App, args: argparse.Namespace) -> dict[str, Any]:
     bars = app.daily_bars([sym], 30).get(sym, [])
     snap = app.client.get_snapshots([sym], feed=app.latest_feed()).get(sym) or {}
     last_price = _f((snap.get("latestTrade") or {}).get("p"), None)
+    fills = app.fills_since_midnight() if app.config["risk"].get("simulate_cash_account") else []
 
     cal_end = app.today + timedelta(days=14)
     ed = parse_date((cand or {}).get("earnings_date")) if cand else None
@@ -377,9 +410,10 @@ def cmd_enter(app: App, args: argparse.Namespace) -> dict[str, Any]:
         account=account, positions=positions, open_orders=open_orders,
         todays_orders=todays_orders, watchlist=wl,
         universe=check_universe(sym, asset, bars, app.config["universe"],
-                                load_exclusions(app.config["universe"], REPO_ROOT)),
+                                load_exclusions(app.config["universe"], REPO_ROOT),
+                                require_fractionable=app.fractional),
         last_price=last_price, open_trades=app.state.load_open_trades(), calendar=cal,
-        size_factor=size_factor,
+        size_factor=size_factor, fills=fills,
     )
     decision = evaluate_entry(ctx, app.config)
     result: dict[str, Any] = {"dry_run": bool(args.dry_run), "decision": decision.to_dict(),
@@ -392,7 +426,7 @@ def cmd_enter(app: App, args: argparse.Namespace) -> dict[str, Any]:
         raise Refused(f"risk checks refused {sym}", result)
 
     client_order_id = new_client_order_id(sym, app.today)
-    order = build_bracket_order(decision, client_order_id)
+    order = build_entry_order(decision, client_order_id, app.mode)
     result["order"] = order
     if args.dry_run:
         result["would_submit"] = True
@@ -422,6 +456,9 @@ def cmd_enter(app: App, args: argparse.Namespace) -> dict[str, Any]:
         "stop": decision.stop,
         "target": decision.target,
         "qty": decision.qty,
+        "order_mode": app.mode,
+        "stop_order_id": None,      # fractional mode: current protective stop (set by `protect`)
+        "stop_order_ids": [],       # every stop placed over the position's life (for reconcile)
         "size_factor": size_factor,
         "earnings_date": str(cand.get("earnings_date")),
         "submitted_at": utc_iso(app.now),
@@ -449,7 +486,8 @@ def cmd_close(app: App, args: argparse.Namespace) -> dict[str, Any]:
     if fails:
         raise Refused(f"close refused for {sym}", {"symbol": sym, "failures": fails})
 
-    # 1. Cancel every open order for the symbol (bracket legs hold the qty).
+    # 1. Cancel every open order for the symbol: bracket legs (bracket mode) or the
+    #    protective DAY stop (fractional mode) hold the qty.
     cancelled, cancel_errors = [], []
     for o in _open_orders_for(app, sym):
         try:
@@ -471,12 +509,17 @@ def cmd_close(app: App, args: argparse.Namespace) -> dict[str, Any]:
             f"Remaining: {[o.get('id') for o in remaining]}"
         )
 
-    # 3. Close the position (market order). Not retried.
+    # 3. Close the position with a market sell. Not retried.
     try:
-        close_order = app.client.close_position(sym)
+        if app.fractional:
+            from lib.orders import EXIT_PREFIX, client_order_id, market_sell_order
+            close_order = app.client.submit_order(market_sell_order(
+                sym, str(position.get("qty")), client_order_id(EXIT_PREFIX, sym, app.today)))
+        else:
+            close_order = app.client.close_position(sym)
     except AlpacaError as exc:
         raise CommandError(
-            f"close_position failed ({exc}); the bracket legs for {sym} are already cancelled, "
+            f"closing {sym} failed ({exc}); its stop order(s) are already cancelled, "
             f"so the position is currently UNPROTECTED. Do not retry automatically; report this."
         ) from None
 
@@ -487,6 +530,7 @@ def cmd_close(app: App, args: argparse.Namespace) -> dict[str, Any]:
         trades[cid]["close_reason"] = args.reason
         trades[cid]["close_requested_at"] = utc_iso(app.now)
         trades[cid]["close_order_id"] = (close_order or {}).get("id")
+        trades[cid]["stop_order_id"] = None
     if tracked:
         app.state.save_open_trades(trades)
     return {
@@ -495,6 +539,66 @@ def cmd_close(app: App, args: argparse.Namespace) -> dict[str, Any]:
         "tracked_records": tracked,
         "warning": None if tracked else f"{sym} had no record in open_trades.json (untracked position)",
     }
+
+
+def cmd_protect(app: App, args: argparse.Namespace) -> dict[str, Any]:
+    """Fractional mode: exactly one DAY sell stop per position at the recorded stop."""
+    from lib.protect import execute_protection, plan_protection
+    if not app.fractional:
+        return {"order_mode": app.mode, "results": [],
+                "note": "bracket mode: positions are protected by their bracket stop legs"}
+    clock = app.client.get_clock()
+    positions = app.client.get_positions()
+    open_orders = app.client.list_orders(status="open", nested=False)
+    trades = app.state.load_open_trades()
+    plan = plan_protection(positions, open_orders, trades)
+    out = execute_protection(app.client, plan, trades, app.today)
+    app.state.save_open_trades(trades)
+    counts: dict[str, int] = {}
+    for r in out["results"]:
+        key = r["flag"] if r["action"] == "flag" else r["action"]
+        counts[key] = counts.get(key, 0) + 1
+    payload = {
+        "order_mode": app.mode,
+        "market_open": bool(clock.get("is_open")),
+        "note": None if clock.get("is_open") else
+        "market closed: new DAY stops are queued by Alpaca for the next session",
+        "counts": counts,
+        "results": out["results"],
+        "flagged": [r for r in out["results"] if r["action"] == "flag"],
+    }
+    if out["errors"]:
+        raise CommandError(f"protect failed for {len(out['errors'])} position(s)", payload)
+    return payload
+
+
+def cmd_targets(app: App, args: argparse.Namespace) -> dict[str, Any]:
+    """Fractional mode: positions whose last price is at or above the recorded target."""
+    from lib.protect import latest_record
+    if not app.fractional:
+        return {"order_mode": app.mode, "targets": [],
+                "note": "bracket mode: targets are handled by the bracket take-profit legs"}
+    positions = app.client.get_positions()
+    trades = app.state.load_open_trades()
+    syms = [str(p.get("symbol", "")).upper() for p in positions]
+    snaps = app.client.get_snapshots(syms, feed=app.latest_feed()) if syms else {}
+    hits, untracked = [], []
+    for p in positions:
+        sym = str(p.get("symbol", "")).upper()
+        found = latest_record(trades, sym)
+        if found is None:
+            untracked.append(sym)
+            continue
+        target = _f(found[1].get("target"), None)
+        last = _f(((snaps.get(sym) or {}).get("latestTrade") or {}).get("p"), None)
+        if last is None:
+            last = _f(p.get("current_price"), None)
+        if target is not None and last is not None and last >= target:
+            hits.append({"symbol": sym, "last_price": last, "target": target, "qty": p.get("qty"),
+                         "client_order_id": found[0], "reason": "target"})
+    return {"order_mode": app.mode, "targets": hits, "untracked_positions": untracked,
+            "note": "Close each with `close SYMBOL --reason target`. Targets are only checked "
+                    "when this command runs."}
 
 
 def cmd_stale(app: App, args: argparse.Namespace) -> dict[str, Any]:
@@ -535,30 +639,8 @@ def cmd_cancel_stale_entries(app: App, args: argparse.Namespace) -> dict[str, An
             "note": "reconcile removes cancelled entries from open_trades.json"}
 
 
-def _exit_from_fills(fills: list[dict[str, Any]], sym: str, since: datetime,
-                     qty: float) -> tuple[float | None, str | None]:
-    from lib.market_calendar import parse_ts
-    got, notional, last_time = 0.0, 0.0, None
-    for f in fills:
-        if str(f.get("symbol", "")).upper() != sym or f.get("side") != "sell":
-            continue
-        ts = parse_ts(f.get("transaction_time"))
-        if ts is None or ts < since:
-            continue
-        q = min(_f(f.get("qty")) or 0.0, qty - got)
-        if q <= 0:
-            break
-        got += q
-        notional += q * (_f(f.get("price")) or 0.0)
-        last_time = f.get("transaction_time")
-        if got >= qty - 1e-9:
-            break
-    if got < qty - 1e-9 or got == 0:
-        return None, None
-    return notional / got, last_time
-
-
 def cmd_reconcile(app: App, args: argparse.Namespace) -> dict[str, Any]:
+    from lib.exits import classify_exit, exit_fills, vwap
     from lib.market_calendar import NY, parse_ts, utc_iso
     from lib.risk import days_held
 
@@ -608,20 +690,33 @@ def cmd_reconcile(app: App, args: argparse.Namespace) -> dict[str, Any]:
         entry_price = rec["filled_entry_price"]
         entry_time = rec["filled_at"]
         entry_dt = parse_ts(entry_time) if entry_time else None
+        used = exit_fills(fills, sym, entry_dt, filled_qty) if entry_dt is not None else []
         reason, leg_price = None, None
-        for leg in full.get("legs") or []:
-            if leg.get("status") != "filled":
-                continue
-            if leg.get("type") == "limit":
-                reason, leg_price = "target", _f(leg.get("filled_avg_price"), None)
-            elif leg.get("type") in ("stop", "stop_limit", "trailing_stop"):
-                reason, leg_price = "stop", _f(leg.get("filled_avg_price"), None)
-        if reason is None:
-            reason = rec.get("close_reason") or "unknown"
+        if rec.get("order_mode", "bracket") == "fractional":
+            # No bracket legs: classify by the orders behind the sell fills. Stops are
+            # re-placed daily, so match against every stop id recorded for the position,
+            # and look up any other order id to catch stops that were never recorded.
+            known = {str(i) for i in (rec.get("stop_order_ids") or [])}
+            known |= {str(rec.get("stop_order_id") or ""), str(rec.get("close_order_id") or "")}
+            order_types: dict[str, str] = {}
+            for f in used:
+                oid = str(f.get("order_id") or "")
+                if oid and oid not in known and oid not in order_types:
+                    o = app.client.get_order(oid, nested=False) or {}
+                    order_types[oid] = str(o.get("type") or "")
+            reason = classify_exit(used, rec, order_types)
+        else:
+            for leg in full.get("legs") or []:
+                if leg.get("status") != "filled":
+                    continue
+                if leg.get("type") == "limit":
+                    reason, leg_price = "target", _f(leg.get("filled_avg_price"), None)
+                elif leg.get("type") in ("stop", "stop_limit", "trailing_stop"):
+                    reason, leg_price = "stop", _f(leg.get("filled_avg_price"), None)
+            if reason is None:
+                reason = rec.get("close_reason") or "unknown"
 
-        exit_price, exit_time = (None, None)
-        if entry_dt is not None:
-            exit_price, exit_time = _exit_from_fills(fills, sym, entry_dt, filled_qty)
+        exit_price, exit_time = vwap(used)
         if exit_price is None and leg_price is not None:
             exit_price = leg_price
         if exit_price is None and rec.get("close_order_id"):
@@ -775,6 +870,8 @@ COMMANDS: dict[str, Callable[[App, argparse.Namespace], Any]] = {
     "enter": cmd_enter,
     "close": cmd_close,
     "stale": cmd_stale,
+    "protect": cmd_protect,
+    "targets": cmd_targets,
     "cancel-stale-entries": cmd_cancel_stale_entries,
     "reconcile": cmd_reconcile,
     "skip": cmd_skip,
@@ -831,6 +928,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("symbol")
     s.add_argument("--reason", required=True, choices=list(CLOSE_REASONS))
     add_parser("stale")
+    add_parser("protect")
+    add_parser("targets")
     add_parser("cancel-stale-entries")
     add_parser("reconcile")
     s = add_parser("skip")
@@ -912,6 +1011,8 @@ def main(argv: list[str] | None = None) -> int:
         code = EXIT_ERROR
         msg = str(exc) or type(exc).__name__
         payload = {"ok": False, "command": args.command, "error": msg}
+        if isinstance(exc, CommandError) and exc.payload:
+            payload.update({k: v for k, v in exc.payload.items() if k not in ("ok", "command", "error")})
         summary = msg
     _log_run(state, argv, args.command, code == EXIT_OK, summary)
     print(json.dumps(payload, indent=indent, default=_json_default))

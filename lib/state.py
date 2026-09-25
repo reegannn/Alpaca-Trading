@@ -29,7 +29,7 @@ RUN_LOG_COLUMNS = ["timestamp", "subcommand", "args", "ok", "result"]
 
 EXIT_REASONS = {"stop", "target", "time_stop", "earnings_exit", "thesis_broken", "manual",
                 "risk", "unknown"}
-CLOSE_REASONS = ("time_stop", "earnings_exit", "thesis_broken", "manual", "risk")
+CLOSE_REASONS = ("time_stop", "earnings_exit", "target", "stop", "thesis_broken", "manual", "risk")
 
 
 def load_config(path: Path) -> dict[str, Any]:

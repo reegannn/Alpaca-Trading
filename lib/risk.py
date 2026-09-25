@@ -13,6 +13,7 @@ from datetime import date, datetime, timedelta
 from typing import Any
 
 from .market_calendar import NY, Session, TradingCalendar, parse_date, parse_ts
+from .orders import fractional_entry_order, order_mode
 from .sizing import (SizingResult, entry_limit_price, round_to_tick, size_position,
                      valid_size_factor)
 from .universe import UniverseResult
@@ -73,6 +74,34 @@ def pending_notional(order: dict[str, Any]) -> float:
     return max(remaining, 0.0) * _f(order.get("limit_price"))
 
 
+def unsettled_sell_proceeds(fills: list[dict[str, Any]], today: date) -> float:
+    """Proceeds of sells filled today (New York date), from FILL activities.
+
+    Under T+1 settlement these are not yet settled, so a cash account could not
+    spend them on new purchases today.
+    """
+    total = 0.0
+    for f in fills:
+        if f.get("side") != "sell":
+            continue
+        ts = parse_ts(f.get("transaction_time"))
+        if ts is None or ts.astimezone(NY).date() != today:
+            continue
+        total += _f(f.get("qty")) * _f(f.get("price"))
+    return total
+
+
+def settled_cash_available(account: dict[str, Any], fills: list[dict[str, Any]],
+                           open_orders: list[dict[str, Any]], today: date) -> float:
+    """Cash-account buying power for new entries.
+
+    cash - proceeds of sells filled today - notional of pending (unfilled) entry orders.
+    """
+    cash = _f(account.get("cash"))
+    pending = sum(pending_notional(o) for o in pending_entries(open_orders))
+    return cash - unsettled_sell_proceeds(fills, today) - pending
+
+
 def sector_by_symbol(open_trades: dict[str, dict[str, Any]]) -> dict[str, str]:
     out: dict[str, str] = {}
     for rec in open_trades.values():
@@ -105,6 +134,7 @@ class EntryContext:
     open_trades: dict[str, dict[str, Any]]
     calendar: TradingCalendar              # must cover today .. earnings date
     size_factor: float = 1.0               # 0 < F <= 1; only ever shrinks the position
+    fills: list[dict[str, Any]] = field(default_factory=list)  # FILL activities incl. today
 
 
 @dataclass
@@ -121,7 +151,7 @@ class EntryDecision:
     metrics: dict[str, Any] = field(default_factory=dict)
 
     @property
-    def qty(self) -> int:
+    def qty(self) -> float:
         return self.sizing.qty if self.sizing else 0
 
     def to_dict(self) -> dict[str, Any]:
@@ -136,8 +166,10 @@ class EntryDecision:
 
 def evaluate_entry(ctx: EntryContext, config: dict[str, Any]) -> EntryDecision:
     risk_cfg = config["risk"]
+    fractional = order_mode(config) == "fractional"
     sym = ctx.symbol.upper()
     d = EntryDecision(symbol=sym, passed=False, last_price=ctx.last_price)
+    d.metrics["order_mode"] = "fractional" if fractional else "bracket"
 
     def fail(check: str, reason: str) -> None:
         d.failures.append({"check": check, "reason": reason})
@@ -209,12 +241,20 @@ def evaluate_entry(ctx: EntryContext, config: dict[str, Any]) -> EntryDecision:
     d.stop, d.target, d.limit_price = stop, target, limit
 
     if limit is not None and stop is not None and valid_size_factor(ctx.size_factor):
-        sizing = size_position(equity, limit, stop, risk_cfg, ctx.size_factor)
+        sizing = size_position(equity, limit, stop, risk_cfg, ctx.size_factor, fractional=fractional)
         d.sizing = sizing
         if not sizing.ok:
-            fail("sizing", sizing.reason or "qty < 1")
+            fail("sizing", sizing.reason or "qty <= 0")
     new_notional = (sizing.qty * limit) if (sizing and limit) else 0.0
     d.metrics["notional"] = round(new_notional, 2)
+
+    # Cash-account simulation: never spend unsettled sale proceeds.
+    if risk_cfg.get("simulate_cash_account"):
+        available = settled_cash_available(ctx.account, ctx.fills, ctx.open_orders, ctx.today)
+        d.metrics["settled_cash_available"] = round(available, 2)
+        if new_notional > available + 1e-9:
+            fail("cash_account", f"order notional {new_notional:,.2f} exceeds settled cash "
+                                 f"available {available:,.2f} (cash - today's sell proceeds - pending entries)")
 
     pend = [o for o in pending_entries(ctx.open_orders) if str(o.get("symbol", "")).upper() != sym]
 
@@ -348,6 +388,20 @@ def earnings_exit_due(earnings: Any, today: date, calendar: TradingCalendar) -> 
         while nxt.weekday() >= 5:
             nxt += timedelta(days=1)
     return ev <= nxt
+
+
+def build_entry_order(decision: EntryDecision, client_order_id: str, mode: str) -> dict[str, Any]:
+    """Entry order payload for the configured order mode (decision must have passed)."""
+    if mode == "bracket":
+        return build_bracket_order(decision, client_order_id)
+    if not decision.passed:
+        raise ValueError("refusing to build an order for a decision that failed risk checks")
+    qty, limit, stop, target = decision.qty, decision.limit_price, decision.stop, decision.target
+    if not (isinstance(qty, (int, float)) and qty > 0):
+        raise ValueError("qty must be positive")
+    if limit is None or stop is None or target is None or not (stop < limit < target):
+        raise ValueError("invalid entry prices")
+    return fractional_entry_order(decision.symbol, qty, limit, client_order_id)
 
 
 def build_bracket_order(decision: EntryDecision, client_order_id: str) -> dict[str, Any]:
