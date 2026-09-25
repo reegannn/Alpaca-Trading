@@ -106,11 +106,13 @@ Exit codes: `0` ok, `1` error, `2` refused by risk checks (`"refused": true` plu
 | `bars SYMBOL [--days N]` | Daily SIP bars (default 60) through the previous session. |
 | `snapshot SYM[,SYM]` | Latest trade, quote, today's and previous daily bar (IEX). |
 | `news [--symbols SYM,SYM] [--hours N]` | Alpaca news: headline, summary, source, url, symbols, created_at. |
-| `enter SYMBOL --rationale "..." [--size-factor F] [--dry-run]` | Loads today's watchlist entry, runs **all** risk checks, sizes (scaled by `F`, 0 < F ≤ 1, after all caps), submits one GTC bracket order. `--dry-run` prints the full decision and never submits. |
-| `close SYMBOL --reason time_stop\|earnings_exit\|thesis_broken\|manual\|risk` | Cancels all open orders for the symbol, waits for confirmation, then closes the position; records the reason for `reconcile`. Regular hours only. |
+| `enter SYMBOL --rationale "..." [--size-factor F] [--dry-run]` | Loads today's watchlist entry, runs **all** risk checks, sizes (scaled by `F`, 0 < F ≤ 1, after all caps), submits one entry order: a whole-share GTC bracket (bracket mode), or a fractional DAY limit buy that is filled or cancelled within the run and protected by a stop before `enter` returns (fractional mode; see "Fill-or-cancel entries"). `--dry-run` prints the full decision and never submits. |
+| `protect` | Fractional mode: for every open position, ensures exactly one active DAY sell stop for the full qty at the stop recorded in `open_trades.json` (creates missing, replaces wrong qty/price after a confirmed cancel, removes duplicates, never duplicates). Untracked, breached, no-stop, pending-sell and open-buy ("skipped: open buy order") positions are flagged, not touched. Outputs `unprotected`, `breached` and a `slack_warning` line (`⚠️ UNPROTECTED: SYMBOL (reason)`) when anything is left without a working stop. No-op in bracket mode. |
+| `targets` | Fractional mode: positions whose last price ≥ the recorded target (close with `--reason target`). No-op in bracket mode. |
+| `close SYMBOL --reason time_stop\|earnings_exit\|target\|stop\|thesis_broken\|manual\|risk` | Cancels all open orders for the symbol (stop or bracket legs), waits for confirmation, then sells: a fractional market sell (fractional mode) or `DELETE /v2/positions/{symbol}` (bracket mode). Records the reason for `reconcile`. Regular hours only. |
 | `stale` | Positions to close now, each with a `reason`: `earnings_exit` (earnings date on or before the next trading day; takes precedence) or `time_stop` (held ≥ `max_hold_days` trading days). |
 | `cancel-stale-entries` | Cancels bot entry parents (`sw-` prefix) that are still completely unfilled. |
-| `reconcile` | Resolves every `open_trades.json` record: cancelled → removed; exited → `trades.csv` row (actual fill prices); flags untracked positions. |
+| `reconcile` | Resolves every `open_trades.json` record: cancelled/expired entry → removed; exited → `trades.csv` row (actual fill prices from FILL activities). Exit reason: bracket legs (bracket mode); in fractional mode, the orders behind the sell fills (any stop id recorded over the position's life, or any stop-type order → `stop`; the `close` order → its reason). Flags untracked positions. |
 | `skip SYMBOL --lesson L-xxx` | Appends a lesson-blocked candidate to `skipped.csv`. |
 | `review --days N \| --all [--markdown]` | Portfolio / per-tag / per-source / per-size-factor stats, exit reasons, equity vs SPY, skipped-trade evaluation, open positions. |
 
@@ -120,12 +122,100 @@ All limits come from `config.yaml`; every failed check is reported: long-only; m
 min after the open / ≥15 min before the close; circuit breaker; entries today < max (from Alpaca order
 history); symbol in today's valid watchlist; universe; no existing position/order; open positions
 (+ pending entries) + 1 ≤ max; gross exposure; sector exposure; earnings blackout; stop < limit <
-target, stop distance, reward:risk; trigger met; qty ≥ 1 whole share.
+target, stop distance, reward:risk; trigger met; qty > 0 (≥ 1 whole share in bracket mode);
+order notional ≥ `min_order_notional`; settled cash (when `simulate_cash_account`); asset
+`fractionable` (fractional mode, via the universe check).
 
-Sizing: `qty = floor(min(risk_per_trade × equity / (limit − stop), max_position_pct × equity / limit) × size_factor)`,
+Sizing: `raw = min(risk_per_trade × equity / (limit − stop), max_position_pct × equity / limit) × size_factor`,
 where `size_factor` (default 1) comes from `--size-factor` and can only shrink the position.
-Order: bracket, `side=buy`, `type=limit`, `limit = last × (1 + slippage)` rounded to the tick,
-`time_in_force=gtc`, `client_order_id = sw-YYYYMMDD-SYMBOL-<6 hex>`. Submission is never retried.
+Fractional mode: `qty = raw` rounded down to 9 decimals (Alpaca's maximum precision). Bracket mode:
+`qty = floor(raw)`. Either way the order is refused if `qty × limit < risk.min_order_notional`.
+`limit = last × (1 + slippage)` rounded to the tick; `client_order_id = sw-YYYYMMDD-SYMBOL-<6 hex>`.
+Submission is never retried.
+
+## Order modes
+
+`config.yaml` → `orders.mode` (default `fractional`).
+
+| | `fractional` (small accounts, ~$60–$300) | `bracket` |
+|---|---|---|
+| Entry | fractional `limit` buy, `time_in_force=day` | whole-share `limit` bracket, `gtc` |
+| Stop | separate DAY sell `stop` placed by `protect` (`sl-` client id), re-placed every session | bracket stop leg (GTC) |
+| Target | checked by `targets` at each trade run, closed with a market sell | bracket take-profit leg (GTC) |
+| Unfilled entry | cancelled by `enter` itself after `entry_fill_timeout_seconds` (fill-or-cancel); `cancel-stale-entries` remains a safety net | cancelled by `cancel-stale-entries` |
+| Universe | also requires `asset.fractionable == true` | — |
+
+Alpaca facts this relies on (docs.alpaca.markets, "Fractional Trading" and "Orders at Alpaca"):
+fractional trading supports market, limit, stop and stop-limit orders with `time_in_force=day` only;
+`qty` accepts up to 9 decimal places; fractional sells are always long. A DAY order "submitted after
+the close ... is queued and submitted the following trading day"; unfilled DAY orders are cancelled
+after the close.
+
+### Fill-or-cancel entries (fractional mode)
+
+`enter` never leaves a fractional entry working after the run:
+
+1. It submits the DAY limit buy once (never retried) and saves the `open_trades.json` record.
+2. It polls the order every `orders.entry_fill_poll_seconds` (5 s) for up to
+   `orders.entry_fill_timeout_seconds` (60 s).
+3. If the order is not completely filled, it cancels the remainder and confirms the cancel.
+4. What it records:
+   - **Full fill:** status `filled`, and the stop is placed at once for the filled qty.
+   - **Partial fill:** status `partial`, and the stop covers only the filled qty.
+   - **No fill:** status `cancelled`; no position and no stop. `reconcile` removes the record.
+
+   The record's `qty` is always the actual filled qty.
+5. **If the stop fails:** `enter` checks that no stop is already open, so a retry can never
+   duplicate, and tries once more. If the retry fails too, it closes the filled qty at once with a
+   market sell (`close_reason` `risk`) and exits 1 with a `slack_warning`. If even that sell fails,
+   the warning says the position is open without a stop.
+
+A successful `enter` therefore always leaves the position protected. `cancel-stale-entries` in the
+post-close run stays as a safety net.
+
+### Daily stop re-placement
+
+Because fractional stops must be DAY orders, each one lapses at the close. `protect` re-creates it:
+
+1. **Post-close run** (after `reconcile`): places the next session's stop. Alpaca queues it, so it is
+   live from the next open.
+2. **First step of every trade run**: confirms the stop is there, and creates or repairs it if the
+   post-close run failed or the position changed. Protection is re-checked at 14:45, 17:30 and
+   20:30 UK.
+3. **After entries in a trade run**: gives newly filled positions a stop straight away.
+
+`protect` skips any symbol with an open **buy** order and reports "skipped: open buy order". A sell stop
+could be rejected as a potential wash trade. This should not happen, because `enter` never leaves a
+buy working.
+
+`protect` never holds two sells for one symbol. Alpaca may reject a second quantity sell for a
+fractional position outside market hours, and a duplicate could oversell. To replace a stop it
+cancels the old one, confirms the cancel, and only then submits the new one.
+
+**Remaining accepted risks (fractional mode):**
+- **Post-close `protect` fails:** a position has no stop from the next open until the first trade
+  run's `protect` (09:30–09:45 ET, 14:30–14:45 UK).
+- **Seconds during `close`:** the cancelled stop leaves a gap of seconds before the market sell
+  fills. There is a similar gap of seconds inside `enter`, between a fill being seen and its stop
+  being accepted.
+- **Targets are checked only at runs:** price can pass through a target and come back in between.
+
+Two related notes:
+- **Stops are not guaranteed prices:** a triggered stop becomes a market order, so a gap can fill
+  well below the stop.
+- **Warnings:** any `protect` error, unprotected or breached position, or failed `enter`
+  protection puts `⚠️ UNPROTECTED: …` on the first line after the status line of the Slack summary.
+
+### Cash-account simulation
+
+With `risk.simulate_cash_account: true` (default), buying power for a new entry is:
+
+`account cash − proceeds of sells filled today (FILL activities, New York date) − notional of pending entry orders`
+
+With T+1 settlement, today's sale proceeds are not settled until the next trading day, so the bot
+never buys with unsettled funds, as a real cash account couldn't. That avoids good-faith violations.
+`status` shows `settled_cash_available`, and `enter` refuses with check `cash_account` when an order
+would exceed it.
 
 ## Kill switch
 
@@ -241,3 +331,33 @@ Differences from the original handoff, and why:
     inferring a channel from repo content, the web or Slack.
 22. **All four `routines/*.md` prompts** gain that `Slack:` line as their last line (so none of them
     is verbatim from the original handoff any more).
+23. **Fractional order mode (new default).**
+    - **Config:** `orders.mode: fractional | bracket`; the bracket path is unchanged.
+    - **Fractional mode:** fractional DAY limit entries; a DAY stop per position placed by the new
+      `protect` command; targets checked by the new `targets` command; `close` cancels the stop,
+      confirms it, then sends a fractional market sell.
+    - **Reconcile:** classifies fractional exits from FILL activities using every stop order id
+      recorded in `open_trades.json` (`stop_order_id` / `stop_order_ids`).
+    - **Other additions:** new module `lib/orders.py`, plus `lib/protect.py` and `lib/exits.py`;
+      `close` accepts the new reasons `target` and `stop`.
+    - **After-hours queueing** of DAY orders is supported by Alpaca (see "Order modes"), so the
+      post-close run places the next day's stops.
+24. **Trade routine protection steps:**
+    - `protect` runs first.
+    - Positions `protect` flags as `breached` are closed with `--reason stop` immediately after it,
+      before any other step. The post-close run only flags them.
+    - `protect` runs again after entries as a final check.
+25. **Small-account risk defaults:** `max_position_pct_equity 0.35`, `max_open_positions 4`,
+    `max_sector_pct_equity 0.50`, `daily_loss_circuit_breaker_pct -0.03`, new `min_order_notional 5.0`
+    (applied in both modes) and `simulate_cash_account true`. The cash check also subtracts pending
+    entry orders, which would otherwise double-spend the same cash.
+26. **Fill-or-cancel fractional entries.** Configured by `orders.entry_fill_timeout_seconds` (60)
+    and `orders.entry_fill_poll_seconds` (5). `enter` polls, cancels the remainder, confirms it, and
+    places the stop for the filled qty before returning. If the stop fails twice, it closes the
+    position with `--reason risk` semantics (`close_reason: risk`) and reports the error. New module
+    `lib/entry.py`. Entries can no longer fill after the run.
+27. **`protect` skips symbols with an open buy order** ("skipped: open buy order", flag `open_buy`)
+    to avoid wash-trade rejections.
+28. **Slack protection warning.** `protect` outputs `unprotected`, `breached` and `slack_warning`,
+    and a failed `enter` outputs `slack_warning` too. When present, the warning must be the first
+    line after the status line of the Slack summary (see `CLAUDE.md`).

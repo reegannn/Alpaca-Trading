@@ -66,7 +66,11 @@ BASE_CONFIG: dict[str, Any] = {
         "entry_limit_slippage_pct": 0.0,
         "no_entry_minutes_after_open": 15,
         "no_entry_minutes_before_close": 15,
+        "min_order_notional": 5.0,
+        "simulate_cash_account": False,     # enabled explicitly in the cash-account tests
     },
+    # Existing tests exercise whole-share bracket sizing; fractional tests set "fractional".
+    "orders": {"mode": "bracket"},
     "holding": {"max_hold_days": 10},
     "data": {"latest_feed": "iex", "bars_feed": "sip", "bars_adjustment": "split"},
 }

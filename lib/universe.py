@@ -119,8 +119,13 @@ def avg_dollar_volume(bars: list[dict[str, Any]], lookback: int = DOLLAR_VOLUME_
 
 def check_universe(symbol: str, asset: dict[str, Any] | None,
                    bars: list[dict[str, Any]], universe_cfg: dict[str, Any],
-                   exclusions: set[str] | None = None) -> UniverseResult:
-    """Evaluate every filter and report pass/fail per filter (never short-circuits)."""
+                   exclusions: set[str] | None = None,
+                   require_fractionable: bool = False) -> UniverseResult:
+    """Evaluate every filter and report pass/fail per filter (never short-circuits).
+
+    ``require_fractionable`` (fractional order mode) adds a check that the asset
+    reports ``fractionable == true``.
+    """
     sym = symbol.upper()
     checks: dict[str, dict[str, Any]] = {}
 
@@ -137,6 +142,10 @@ def check_universe(symbol: str, asset: dict[str, Any] | None,
         exch = str(asset.get("exchange", ""))
         allowed = [str(e).upper() for e in universe_cfg.get("allowed_exchanges", [])]
         add("exchange", exch.upper() in allowed, f"exchange={exch}")
+
+        if require_fractionable:
+            frac = asset.get("fractionable")
+            add("fractionable", frac is True, f"fractionable={frac} (required in fractional order mode)")
 
     lev = leveraged_match(sym, (asset or {}).get("name", ""), universe_cfg)
     add("not_leveraged", lev is None, lev.reason if lev else "ok")

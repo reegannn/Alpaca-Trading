@@ -19,19 +19,34 @@ universe:
   fund_name_indicators: [ETF, ETFS, ETN, ETNS, ETP, FUND, TRUST, PROSHARES, DIREXION, ISHARES, SPDR, INVESCO, VANECK, WISDOMTREE, "GLOBAL X", GRANITESHARES, "LEVERAGE SHARES", "T-REX", TRADR, DEFIANCE, "VOLATILITY SHARES", MICROSECTORS, IPATH, AXS, ROUNDHILL, YIELDMAX]
   leveraged_etf_symbols: [TQQQ, SQQQ, SOXL, SOXS, UPRO, SPXU, SPXL, SPXS, TNA, TZA, LABU, LABD, FNGU, FNGD, NUGT, DUST, UVXY, SVXY, VXX, VIXY, TSLL, NVDL, SSO, SDS, QLD, QID]
 
+orders:
+  # fractional: fractional DAY limit entries + a DAY sell stop re-placed daily by `protect`;
+  #             targets are checked by `targets` at each trade run (small accounts).
+  # bracket:    whole-share GTC bracket orders (stop + target legs held by Alpaca).
+  mode: fractional
+  # Fractional entries are fill-or-cancel within the run: `enter` polls the limit buy every
+  # entry_fill_poll_seconds for up to entry_fill_timeout_seconds, cancels any remainder, and
+  # places the protective stop for the filled qty before returning.
+  entry_fill_timeout_seconds: 60
+  entry_fill_poll_seconds: 5
+
 risk:
   long_only: true
-  max_position_pct_equity: 0.10
+  max_position_pct_equity: 0.35
   risk_per_trade_pct_equity: 0.01
-  max_open_positions: 8
+  max_open_positions: 4
   max_gross_exposure_pct_equity: 1.00   # no margin
-  max_sector_pct_equity: 0.30
+  max_sector_pct_equity: 0.50
   max_new_entries_per_day: 2
-  daily_loss_circuit_breaker_pct: -0.02 # (equity - last_equity) / last_equity
+  daily_loss_circuit_breaker_pct: -0.03 # (equity - last_equity) / last_equity
   earnings_blackout_trading_days: 3
   min_reward_to_risk: 1.5
   max_stop_distance_pct: 0.12
   entry_limit_slippage_pct: 0.003
+  min_order_notional: 5.0               # reject entries smaller than this (USD)
+  # Cash-account simulation: buying power for new entries = cash - proceeds of sells
+  # filled today (unsettled) - pending entry orders. Never trade on unsettled funds.
+  simulate_cash_account: true
   # No entries in the first / last N minutes of the regular session.
   no_entry_minutes_after_open: 15
   no_entry_minutes_before_close: 15
