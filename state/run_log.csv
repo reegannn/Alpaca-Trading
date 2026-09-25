@@ -1,0 +1,6 @@
+timestamp,subcommand,args,ok,result
+2026-09-25T23:21:52Z,clock,clock --pretty,true,"{""now_utc"":""2026-09-25T23:21:51Z"",""now_new_york"":""2026-09-25T19:21:51-04:00"",""today"":""2026-09-25"",""is_open"":false,""next_open"":""2026-09-28T09:30:00-04:00"",""next_close"":""2026-09-28T16:00:00-04:00"",""i..."
+2026-09-25T23:21:56Z,cancel-stale-entries,cancel-stale-entries,true,"{""cancelled"":[],""partially_filled_not_cancelled"":[],""note"":""reconcile removes cancelled entries from open_trades.json""}"
+2026-09-25T23:21:59Z,reconcile,reconcile,true,"{""closed_trades"":[],""cancelled_entries"":[],""still_open"":[],""pending_entries"":[],""untracked_positions"":[],""issues"":[]}"
+2026-09-25T23:21:59Z,protect,protect,true,"{""order_mode"":""fractional"",""market_open"":false,""note"":""market closed: new DAY stops are queued by Alpaca for the next session"",""counts"":{},""results"":[],""flagged"":[],""breached"":[],""unprotected"":[],""..."
+2026-09-25T23:22:01Z,status,status,true,"{""order_mode"":""fractional"",""market_open"":false,""equity"":300.0,""last_equity"":300.0,""day_pnl"":0.0,""day_pnl_pct"":0.0,""cash"":300.0,""buying_power"":300.0,""simulate_cash_account"":true,""settled_cash_availa..."
