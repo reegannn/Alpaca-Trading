@@ -1,0 +1,21 @@
+# Example watchlist. The research run writes state/watchlist/YYYY-MM-DD.yaml
+# in exactly this format. `date` must equal today's New York date.
+date: 2026-09-28
+generated_at: "2026-09-28T12:05:00Z"
+candidates:
+  - symbol: XYZ
+    asset_type: stock            # stock | etf
+    sector: Technology
+    setup_tag: pullback_to_trend # must be in the CLAUDE.md list
+    idea_source: news_catalyst   # must be in the CLAUDE.md list
+    thesis: "Uptrend intact (above rising 50-day SMA); pulled back 6% to the 20-day SMA on light volume. Expect resumption toward the prior high over 2-10 days."
+    catalyst: "New product launch confirmed in company press release; two analyst upgrades this week."
+    trigger:
+      type: above                # above = enter if last >= price; below = enter if last <= price
+      price: 123.45
+    stop: 115.00                 # below the recent swing low
+    target: 140.00               # prior high / resistance
+    earnings_date: 2026-10-20    # date | unknown | n/a (etf only)
+    sources:
+      - https://investor.example.com/press-release
+      - https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0000000000
