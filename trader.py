@@ -71,6 +71,8 @@ class App:
     client: Any                    # lib.alpaca_client.AlpacaClient
     now: datetime
     _calendar_cache: dict[tuple[date, date], Any] = field(default_factory=dict)
+    sleep: Callable[[float], None] = time.sleep          # injectable for tests
+    monotonic: Callable[[], float] = time.monotonic
 
     @property
     def today(self) -> date:
@@ -443,7 +445,7 @@ def cmd_enter(app: App, args: argparse.Namespace) -> dict[str, Any]:
 
     assert cand is not None
     trades = app.state.load_open_trades()
-    trades[client_order_id] = {
+    rec: dict[str, Any] = {
         "symbol": sym,
         "order_id": submitted.get("id"),
         "sector": cand.get("sector"),
@@ -457,15 +459,55 @@ def cmd_enter(app: App, args: argparse.Namespace) -> dict[str, Any]:
         "target": decision.target,
         "qty": decision.qty,
         "order_mode": app.mode,
-        "stop_order_id": None,      # fractional mode: current protective stop (set by `protect`)
+        "stop_order_id": None,      # fractional mode: current protective stop
         "stop_order_ids": [],       # every stop placed over the position's life (for reconcile)
         "size_factor": size_factor,
         "earnings_date": str(cand.get("earnings_date")),
         "submitted_at": utc_iso(app.now),
         "watchlist_date": app.today.isoformat(),
     }
-    app.state.save_open_trades(trades)
+    trades[client_order_id] = rec
+    app.state.save_open_trades(trades)      # saved before polling: a crash still leaves a record
     result["submitted"] = _order_view(submitted)
+    if not app.fractional:
+        return result
+
+    # Fractional mode: fill-or-cancel within this run, then protect the filled qty.
+    from lib.entry import follow_fractional_entry
+    from lib.protect import remember_stop
+    ocfg = app.config.get("orders") or {}
+    outcome = follow_fractional_entry(
+        app.client, submitted, sym, float(decision.stop), app.today,
+        timeout_seconds=float(ocfg.get("entry_fill_timeout_seconds", 60)),
+        poll_seconds=float(ocfg.get("entry_fill_poll_seconds", 5)),
+        sleep=app.sleep, monotonic=app.monotonic,
+    )
+    trades = app.state.load_open_trades()
+    rec = trades.get(client_order_id, rec)
+    rec["entry_status"] = outcome.status
+    rec["qty"] = float(outcome.filled_qty)            # actual filled qty (0 if nothing filled)
+    if float(outcome.filled_qty) > 0:
+        rec["filled_qty"] = float(outcome.filled_qty)
+        rec["filled_entry_price"] = outcome.filled_avg_price
+        rec["filled_at"] = outcome.filled_at
+    if outcome.stop_order_id:
+        remember_stop(rec, outcome.stop_order_id)
+    if outcome.close_order_id:
+        rec["close_reason"] = "risk"
+        rec["close_requested_at"] = utc_iso(app.now)
+        rec["close_order_id"] = outcome.close_order_id
+    trades[client_order_id] = rec
+    app.state.save_open_trades(trades)      # unfilled records are removed by `reconcile`
+    result["fill"] = outcome.to_dict()
+
+    if outcome.status in ("closed_unprotected", "unprotected") or outcome.errors:
+        warning = None
+        if outcome.status in ("closed_unprotected", "unprotected"):
+            warning = f"⚠️ UNPROTECTED: {sym} (stop placement failed twice; " + (
+                "position closed with --reason risk)" if outcome.status == "closed_unprotected"
+                else "closing ALSO failed — position is open without a stop)")
+        raise CommandError(f"entry for {sym} finished with errors: {'; '.join(outcome.errors)}",
+                           {**result, "slack_warning": warning})
     return result
 
 
@@ -498,10 +540,10 @@ def cmd_close(app: App, args: argparse.Namespace) -> dict[str, Any]:
             cancel_errors.append({"order_id": o["id"], "error": str(exc)})
 
     # 2. Wait until Alpaca confirms nothing is open for the symbol.
-    deadline = time.monotonic() + CANCEL_WAIT_SECONDS
+    deadline = app.monotonic() + CANCEL_WAIT_SECONDS
     remaining = _open_orders_for(app, sym)
-    while remaining and time.monotonic() < deadline:
-        time.sleep(CANCEL_POLL_SECONDS)
+    while remaining and app.monotonic() < deadline:
+        app.sleep(CANCEL_POLL_SECONDS)
         remaining = _open_orders_for(app, sym)
     if remaining:
         raise CommandError(
@@ -543,9 +585,10 @@ def cmd_close(app: App, args: argparse.Namespace) -> dict[str, Any]:
 
 def cmd_protect(app: App, args: argparse.Namespace) -> dict[str, Any]:
     """Fractional mode: exactly one DAY sell stop per position at the recorded stop."""
-    from lib.protect import execute_protection, plan_protection
+    from lib.protect import execute_protection, plan_protection, unprotected_summary
     if not app.fractional:
-        return {"order_mode": app.mode, "results": [],
+        return {"order_mode": app.mode, "results": [], "unprotected": [], "breached": [],
+                "slack_warning": None,
                 "note": "bracket mode: positions are protected by their bracket stop legs"}
     clock = app.client.get_clock()
     positions = app.client.get_positions()
@@ -567,6 +610,11 @@ def cmd_protect(app: App, args: argparse.Namespace) -> dict[str, Any]:
         "results": out["results"],
         "flagged": [r for r in out["results"] if r["action"] == "flag"],
     }
+    unprotected, warning = unprotected_summary(out["results"])
+    payload["breached"] = [r["symbol"] for r in out["results"] if r.get("flag") == "breached"]
+    payload["unprotected"] = unprotected
+    # If set, this must be the first line after the status line of the Slack summary.
+    payload["slack_warning"] = warning
     if out["errors"]:
         raise CommandError(f"protect failed for {len(out['errors'])} position(s)", payload)
     return payload

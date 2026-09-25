@@ -6,6 +6,6 @@ Post-close run for the paper swing-trading bot. Do not place new entries.
 4. Append a "Day summary" section to state/journal/<today>.md: equity and day P&L, trades opened and closed, the `protect` result, anything surprising. Observations only — no rule or lesson changes.
 5. Run `bash scripts/finish_run.sh "postclose <today>"`.
 
-Final step (always): post the Post-close summary to Slack exactly as described under "Slack summaries" in CLAUDE.md.
+Final step (always): post the Post-close summary to Slack exactly as described under "Slack summaries" in CLAUDE.md. If `protect` produced a `slack_warning`, or reported errors, unprotected or breached positions, the first line after the status line must be the warning (e.g. "⚠️ UNPROTECTED: SYMBOL (breached)"); list every breached position.
 
 Slack: post the run summary ONLY to channel ID <SLACK_CHANNEL_ID>. Never post to any other channel or user.

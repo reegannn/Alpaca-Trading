@@ -24,6 +24,11 @@ orders:
   #             targets are checked by `targets` at each trade run (small accounts).
   # bracket:    whole-share GTC bracket orders (stop + target legs held by Alpaca).
   mode: fractional
+  # Fractional entries are fill-or-cancel within the run: `enter` polls the limit buy every
+  # entry_fill_poll_seconds for up to entry_fill_timeout_seconds, cancels any remainder, and
+  # places the protective stop for the filled qty before returning.
+  entry_fill_timeout_seconds: 60
+  entry_fill_poll_seconds: 5
 
 risk:
   long_only: true

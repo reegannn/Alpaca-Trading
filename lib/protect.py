@@ -11,8 +11,10 @@ stop for the full position qty at the recorded stop price:
 * correct         -> no-op
 
 Positions without a record, without a recorded stop, with another sell order
-already open (e.g. a pending market close), or already trading at/below the
-stop are flagged and left untouched.
+already open (e.g. a pending market close), with an open BUY order (a sell
+stop could be rejected as a potential wash trade; normally impossible because
+`enter` never leaves a buy working), or already trading at/below the stop are
+flagged and left untouched.
 
 ``plan_protection`` is pure; ``execute_protection`` performs the plan against
 a client and is written so a crash or error can never leave two open stops.
@@ -44,7 +46,7 @@ class ProtectAction:
     stop_price: float | None = None
     keep_order_id: str | None = None
     cancel_order_ids: list[str] = field(default_factory=list)
-    flag: str | None = None              # untracked | no_stop_recorded | pending_sell | breached | not_long
+    flag: str | None = None              # untracked | no_stop_recorded | open_buy | pending_sell | breached | not_long
 
     def to_dict(self) -> dict[str, Any]:
         return {k: v for k, v in self.__dict__.items()}
@@ -89,6 +91,9 @@ def plan_protection(positions: list[dict[str, Any]], open_orders: list[dict[str,
         qd = _dec(qty)
         if p.get("side", "long") != "long" or qd is None or qd <= 0:
             plan.append(ProtectAction(sym, "flag", "not a long position", flag="not_long"))
+            continue
+        if any(str(o.get("symbol", "")).upper() == sym and o.get("side") == "buy" for o in open_orders):
+            plan.append(ProtectAction(sym, "flag", "skipped: open buy order", qty=qty, flag="open_buy"))
             continue
         found = latest_record(open_trades, sym)
         if found is None:
@@ -142,12 +147,12 @@ def plan_protection(positions: list[dict[str, Any]], open_orders: list[dict[str,
     return plan
 
 
-def _open_sells(client: Any, sym: str) -> list[dict[str, Any]]:
+def open_sells(client: Any, sym: str) -> list[dict[str, Any]]:
     return [o for o in client.list_orders(status="open", nested=False, symbols=[sym])
             if str(o.get("symbol", "")).upper() == sym and o.get("side") == "sell"]
 
 
-def _remember_stop(rec: dict[str, Any], order_id: str) -> None:
+def remember_stop(rec: dict[str, Any], order_id: str) -> None:
     rec["stop_order_id"] = order_id
     ids = list(rec.get("stop_order_ids") or [])
     if order_id not in ids:
@@ -181,10 +186,10 @@ def execute_protection(client: Any, plan: list[ProtectAction],
                 except Exception as exc:  # noqa: BLE001 - verified by the poll below
                     cancel_errors.append(f"{oid}: {exc}")
             deadline = monotonic() + wait_seconds
-            still = [o for o in _open_sells(client, a.symbol) if str(o.get("id")) in a.cancel_order_ids]
+            still = [o for o in open_sells(client, a.symbol) if str(o.get("id")) in a.cancel_order_ids]
             while still and monotonic() < deadline:
                 sleep(CANCEL_POLL_SECONDS)
-                still = [o for o in _open_sells(client, a.symbol) if str(o.get("id")) in a.cancel_order_ids]
+                still = [o for o in open_sells(client, a.symbol) if str(o.get("id")) in a.cancel_order_ids]
             if still:
                 res["error"] = (f"could not confirm cancellation of {[o.get('id') for o in still]}; "
                                 f"no new stop placed (avoids a duplicate)")
@@ -197,12 +202,12 @@ def execute_protection(client: Any, plan: list[ProtectAction],
 
         if a.action in ("ok", "dedupe"):
             if rec is not None and a.keep_order_id:
-                _remember_stop(rec, a.keep_order_id)
+                remember_stop(rec, a.keep_order_id)
             results.append(res)
             continue
 
         # create / replace: final guard against duplicates, then submit exactly once.
-        open_now = _open_sells(client, a.symbol)
+        open_now = open_sells(client, a.symbol)
         if open_now:
             res["error"] = (f"sell order(s) {[o.get('id') for o in open_now]} still open for "
                             f"{a.symbol}; not placing another stop")
@@ -224,7 +229,27 @@ def execute_protection(client: Any, plan: list[ProtectAction],
         res["submitted_order_id"] = oid
         res["order"] = order
         if rec is not None:
-            _remember_stop(rec, oid)
+            remember_stop(rec, oid)
         results.append(res)
 
     return {"results": results, "errors": errors}
+
+
+# Flags that leave a position without a working stop.
+UNPROTECTED_FLAGS = {"untracked", "no_stop_recorded", "open_buy", "breached", "not_long"}
+
+
+def unprotected_summary(results: list[dict[str, Any]]) -> tuple[list[dict[str, str]], str | None]:
+    """Positions left without a working stop (errors, unprotected flags, breaches),
+    and the Slack warning line for them, e.g. "⚠️ UNPROTECTED: XYZ (breached)"."""
+    items: list[dict[str, str]] = []
+    for r in results:
+        if r.get("error"):
+            items.append({"symbol": r["symbol"], "reason": f"error: {r['error']}"})
+        elif r.get("action") == "flag" and r.get("flag") in UNPROTECTED_FLAGS:
+            reason = r["reason"] if r["flag"] == "open_buy" else str(r["flag"])
+            items.append({"symbol": r["symbol"], "reason": reason})
+    if not items:
+        return [], None
+    text = ", ".join(f"{i['symbol']} ({i['reason'][:80]})" for i in items)
+    return items, f"⚠️ UNPROTECTED: {text}"

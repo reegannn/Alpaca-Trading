@@ -386,3 +386,209 @@ def test_reconcile_records_stop_out_in_fractional_mode(tmp_path: Path, fconfig: 
     assert row["r_multiple"] == pytest.approx((47.4 - 50.0) / (50.0 - 47.5), abs=1e-3)
     assert state.load_open_trades() == {}
     assert state.read_trades()[0]["exit_reason"] == "stop"
+
+
+# ------------------------------------------------- protect: open buy / breach
+
+def test_protect_skips_symbol_with_open_buy() -> None:
+    buy = {"id": "b1", "symbol": "XYZ", "side": "buy", "type": "limit", "qty": "0.2", "status": "new"}
+    broker = Broker([buy])
+    out = run_protect(broker, TRADES())
+    [r] = out["results"]
+    assert r["flag"] == "open_buy" and r["reason"] == "skipped: open buy order"
+    assert broker.submits == [] and broker.cancels == []
+
+
+def test_breached_position_flagged_not_stopped() -> None:
+    from lib.protect import unprotected_summary
+    broker = Broker()
+    out = run_protect(broker, TRADES(), [pos(price="47.00")])
+    [r] = out["results"]
+    assert r["action"] == "flag" and r["flag"] == "breached"
+    assert broker.submits == []
+    items, warning = unprotected_summary(out["results"])
+    assert items == [{"symbol": "XYZ", "reason": "breached"}]
+    assert warning == "⚠️ UNPROTECTED: XYZ (breached)"
+
+
+def test_no_warning_when_all_protected() -> None:
+    from lib.protect import unprotected_summary
+    out = run_protect(Broker(), TRADES())
+    assert unprotected_summary(out["results"]) == ([], None)
+
+
+# ------------------------------------------------ fill-or-cancel `enter`
+
+class EntryBroker:
+    """Fake Alpaca for trader.cmd_enter in fractional mode.
+
+    fill: "full" | "partial" | "none" — how the entry limit buy behaves.
+    stop_failures: how many stop submissions fail before one succeeds.
+    """
+
+    def __init__(self, fill: str = "full", stop_failures: int = 0) -> None:
+        self.fill = fill
+        self.stop_failures = stop_failures
+        self.orders: dict[str, dict[str, Any]] = {}
+        self.submits: list[dict[str, Any]] = []
+        self.cancels: list[str] = []
+        self._n = 0
+
+    # --- reads used by enter's risk checks
+    def get_clock(self) -> dict[str, Any]:
+        return {"is_open": True}
+
+    def get_account(self) -> dict[str, Any]:
+        return {"equity": "100", "last_equity": "100", "cash": "100"}
+
+    def get_positions(self) -> list[dict[str, Any]]:
+        return []
+
+    def get_asset(self, symbol: str) -> dict[str, Any]:
+        return {"symbol": symbol, "class": "us_equity", "status": "active", "tradable": True,
+                "exchange": "NASDAQ", "name": "XYZ Corp", "fractionable": True}
+
+    def get_calendar(self, start: str, end: str) -> list[dict[str, str]]:
+        return weekday_calendar_rows(date.fromisoformat(start), date.fromisoformat(end))
+
+    def get_daily_bars(self, symbols: list[str], **kw: Any) -> dict[str, list[dict[str, Any]]]:
+        return {s: daily_bars(40, 100.0, 1_000_000) for s in symbols}
+
+    def get_snapshots(self, symbols: list[str], feed: str = "iex") -> dict[str, Any]:
+        return {s: {"latestTrade": {"p": 100.0}} for s in symbols}
+
+    def get_fill_activities(self, after: str | None = None) -> list[dict[str, Any]]:
+        return []
+
+    # --- orders
+    def list_orders(self, status: str = "open", symbols: list[str] | None = None, **_: Any) -> list[dict[str, Any]]:
+        out = list(self.orders.values())
+        if status == "open":
+            out = [o for o in out if o["status"] in ("new", "accepted", "partially_filled")]
+        if symbols:
+            out = [o for o in out if o["symbol"] in symbols]
+        return [dict(o) for o in out]
+
+    def submit_order(self, order: dict[str, Any]) -> dict[str, Any]:
+        self.submits.append(order)
+        if order["type"] == "stop" and self.stop_failures > 0:
+            self.stop_failures -= 1
+            raise RuntimeError("HTTP 500")
+        self._n += 1
+        oid = f"o{self._n}"
+        o = {**order, "id": oid, "status": "accepted", "filled_qty": "0", "filled_avg_price": None,
+             "filled_at": None}
+        self.orders[oid] = o
+        return dict(o)
+
+    def get_order(self, oid: str, nested: bool = False) -> dict[str, Any]:
+        o = self.orders[oid]
+        if o["side"] == "buy" and o["status"] in ("accepted", "new", "partially_filled"):
+            if self.fill == "full":
+                o.update(status="filled", filled_qty=o["qty"], filled_avg_price="100",
+                         filled_at=utc(ny(TODAY, 11, 0)))
+            elif self.fill == "partial":
+                o.update(status="partially_filled", filled_qty="0.05", filled_avg_price="100",
+                         filled_at=utc(ny(TODAY, 11, 0)))
+        return dict(o)
+
+    def cancel_order(self, oid: str) -> None:
+        self.cancels.append(oid)
+        o = self.orders[oid]
+        if o["status"] != "filled":
+            o["status"] = "canceled"
+
+    def by_type(self, t: str) -> list[dict[str, Any]]:
+        return [s for s in self.submits if s["type"] == t]
+
+
+def _entry_app(tmp_path: Path, fconfig: dict[str, Any], broker: EntryBroker) -> Any:
+    import itertools
+
+    import yaml
+
+    import trader
+    from lib.state import StateStore
+    fconfig["orders"].update(entry_fill_timeout_seconds=60, entry_fill_poll_seconds=5)
+    state = StateStore(tmp_path)
+    (tmp_path / "watchlist").mkdir(parents=True)
+    state.watchlist_path(TODAY).write_text(yaml.safe_dump(watchlist_data()), encoding="utf-8")
+    state.save_open_trades({})
+    clock = itertools.count(0, 7)           # each monotonic() call advances 7 "seconds"
+    return trader.App(config=fconfig, state=state, client=broker, now=ny(TODAY, 11, 0),
+                      sleep=lambda _s: None, monotonic=lambda: float(next(clock)))
+
+
+def _enter(app: Any) -> dict[str, Any]:
+    import trader
+    return trader.cmd_enter(app, argparse.Namespace(symbol="XYZ", rationale="trigger met",
+                                                    dry_run=False, size_factor=1.0))
+
+
+def test_enter_full_fill_places_stop(tmp_path: Path, fconfig: dict[str, Any]) -> None:
+    broker = EntryBroker(fill="full")
+    app = _entry_app(tmp_path, fconfig, broker)
+    out = _enter(app)
+    [buy] = broker.by_type("limit")
+    assert buy["time_in_force"] == "day" and buy["qty"] == "0.1"
+    [stop] = broker.by_type("stop")
+    assert stop["qty"] == "0.1" and stop["stop_price"] == "95.00" and stop["side"] == "sell"
+    assert broker.cancels == []
+    assert out["fill"]["status"] == "filled" and out["fill"]["protected"]
+    rec = app.state.load_open_trades()[buy["client_order_id"]]
+    assert rec["entry_status"] == "filled" and rec["qty"] == 0.1
+    assert rec["stop_order_id"] == out["fill"]["stop_order_id"]
+    assert rec["stop_order_ids"] == [rec["stop_order_id"]]
+
+
+def test_enter_partial_fill_cancels_remainder_and_stops_filled_qty(tmp_path: Path, fconfig: dict[str, Any]) -> None:
+    broker = EntryBroker(fill="partial")
+    app = _entry_app(tmp_path, fconfig, broker)
+    out = _enter(app)
+    [buy] = broker.by_type("limit")
+    entry_id = out["fill"]["entry_order_id"]
+    assert broker.cancels == [entry_id]
+    assert out["fill"]["cancel_confirmed"] is True
+    [stop] = broker.by_type("stop")
+    assert stop["qty"] == "0.05"
+    rec = app.state.load_open_trades()[buy["client_order_id"]]
+    assert rec["entry_status"] == "partial" and rec["qty"] == 0.05 and rec["filled_qty"] == 0.05
+    assert rec["stop_order_id"] is not None
+
+
+def test_enter_no_fill_is_cancelled_without_stop(tmp_path: Path, fconfig: dict[str, Any]) -> None:
+    broker = EntryBroker(fill="none")
+    app = _entry_app(tmp_path, fconfig, broker)
+    out = _enter(app)
+    [buy] = broker.by_type("limit")
+    assert broker.cancels == [out["fill"]["entry_order_id"]]
+    assert broker.by_type("stop") == [] and broker.by_type("market") == []
+    assert out["fill"]["status"] == "cancelled"
+    rec = app.state.load_open_trades()[buy["client_order_id"]]
+    assert rec["entry_status"] == "cancelled" and rec["qty"] == 0.0 and rec["stop_order_id"] is None
+
+
+def test_enter_stop_retry_succeeds(tmp_path: Path, fconfig: dict[str, Any]) -> None:
+    broker = EntryBroker(fill="full", stop_failures=1)
+    app = _entry_app(tmp_path, fconfig, broker)
+    out = _enter(app)
+    assert len(broker.by_type("stop")) == 2           # first try + one retry
+    assert broker.by_type("market") == []
+    assert out["fill"]["protected"] and out["fill"]["status"] == "filled"
+
+
+def test_enter_stop_failure_retries_then_closes(tmp_path: Path, fconfig: dict[str, Any]) -> None:
+    import trader
+    broker = EntryBroker(fill="full", stop_failures=2)
+    app = _entry_app(tmp_path, fconfig, broker)
+    with pytest.raises(trader.CommandError) as info:
+        _enter(app)
+    assert len(broker.by_type("stop")) == 2           # retried exactly once
+    [sell] = broker.by_type("market")
+    assert sell["side"] == "sell" and sell["qty"] == "0.1" and sell["time_in_force"] == "day"
+    payload = info.value.payload
+    assert payload["fill"]["status"] == "closed_unprotected"
+    assert payload["slack_warning"].startswith("⚠️ UNPROTECTED: XYZ")
+    [buy] = broker.by_type("limit")
+    rec = app.state.load_open_trades()[buy["client_order_id"]]
+    assert rec["close_reason"] == "risk" and rec["close_order_id"] == payload["fill"]["close_order_id"]
