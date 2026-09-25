@@ -6,11 +6,17 @@ Pure functions over an Alpaca asset dict and a list of SIP daily bars
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 DOLLAR_VOLUME_LOOKBACK = 20
+
+# Used only if config.yaml has no universe.fund_name_indicators.
+DEFAULT_FUND_NAME_INDICATORS = (
+    "ETF", "ETFS", "ETN", "ETNS", "ETP", "FUND", "TRUST", "PROSHARES", "DIREXION",
+)
 
 
 @dataclass
@@ -43,21 +49,64 @@ def load_exclusions(universe_cfg: dict[str, Any], repo_root: Path) -> set[str]:
     return out
 
 
-def leveraged_match(symbol: str, name: str, universe_cfg: dict[str, Any]) -> str | None:
-    """Return a reason string if symbol/name looks leveraged, inverse or volatility-linked.
+@dataclass(frozen=True)
+class LeveragedMatch:
+    """Why a symbol was treated as leveraged / inverse / volatility-linked."""
+    source: str                    # "symbol_list" | "name_pattern"
+    entry: str                     # the list entry or pattern that matched
+    fund_indicator: str | None     # the word that marked the name as a fund
+    reason: str
 
-    Name patterns are matched as case-insensitive substrings. This errs on the
-    side of exclusion (e.g. a company called "Ultra ..." is excluded too).
+    def to_dict(self) -> dict[str, Any]:
+        return {"source": self.source, "entry": self.entry,
+                "fund_indicator": self.fund_indicator, "reason": self.reason}
+
+
+def word_match(term: str, upper_text: str) -> bool:
+    """Case-insensitive whole-word match.
+
+    Letters, digits and hyphens count as word characters, so "ULTRA" does not
+    match "Ultragenyx" or "Ultra-Short", "SHORT" does not match "Short-Term",
+    and "2X" does not match inside "-2X" (the "-2X" pattern covers that).
+    """
+    t = term.strip().upper()
+    if not t:
+        return False
+    return re.search(rf"(?<![A-Z0-9-]){re.escape(t)}(?![A-Z0-9-])", upper_text) is not None
+
+
+def fund_indicator(name: str, universe_cfg: dict[str, Any]) -> str | None:
+    """The first fund-indicating word in the asset name, or None for common stocks."""
+    upper = (name or "").upper()
+    for ind in universe_cfg.get("fund_name_indicators") or DEFAULT_FUND_NAME_INDICATORS:
+        if word_match(str(ind), upper):
+            return str(ind).upper()
+    return None
+
+
+def leveraged_match(symbol: str, name: str, universe_cfg: dict[str, Any]) -> LeveragedMatch | None:
+    """Return a match if the symbol/name looks leveraged, inverse or volatility-linked.
+
+    * Any asset on ``leveraged_etf_symbols`` is excluded.
+    * Name patterns apply only to funds (name contains a ``fund_name_indicators``
+      word) and must match whole words. Common stocks are therefore excluded only
+      via the explicit symbol list (e.g. "Ultra Clean Holdings" is allowed).
     """
     sym = symbol.upper()
-    symbols = {str(s).upper() for s in universe_cfg.get("leveraged_etf_symbols", [])}
-    if sym in symbols:
-        return f"{sym} is on the leveraged/volatility symbol list"
+    for entry in universe_cfg.get("leveraged_etf_symbols", []):
+        if str(entry).upper() == sym:
+            return LeveragedMatch("symbol_list", str(entry).upper(), None,
+                                  f"{sym} is on leveraged_etf_symbols")
+    ind = fund_indicator(name, universe_cfg)
+    if ind is None:
+        return None
     upper_name = (name or "").upper()
     for pat in universe_cfg.get("leveraged_etf_name_patterns", []):
-        p = str(pat).upper()
-        if p and p in upper_name:
-            return f"name matches leveraged/volatility pattern {p!r}"
+        if word_match(str(pat), upper_name):
+            p = str(pat).upper()
+            return LeveragedMatch("name_pattern", p, ind,
+                                  f"fund name (indicator {ind!r}) matches "
+                                  f"leveraged_etf_name_patterns entry {p!r}")
     return None
 
 
@@ -90,7 +139,8 @@ def check_universe(symbol: str, asset: dict[str, Any] | None,
         add("exchange", exch.upper() in allowed, f"exchange={exch}")
 
     lev = leveraged_match(sym, (asset or {}).get("name", ""), universe_cfg)
-    add("not_leveraged", lev is None, lev or "ok")
+    add("not_leveraged", lev is None, lev.reason if lev else "ok")
+    checks["not_leveraged"]["matched"] = lev.to_dict() if lev else None
 
     if exclusions:
         add("not_excluded", sym not in exclusions, "in exclude_symbols_file" if sym in exclusions else "ok")

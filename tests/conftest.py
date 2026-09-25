@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
@@ -47,19 +48,8 @@ def daily_bars(n: int, close: float, volume: float, end: date = TODAY - timedelt
 
 
 BASE_CONFIG: dict[str, Any] = {
-    "universe": {
-        "allowed_exchanges": ["NYSE", "NASDAQ", "ARCA", "NYSEARCA", "AMEX", "BATS"],
-        "min_price": 5.0,
-        "min_avg_dollar_volume_20d": 20_000_000,
-        "exclude_symbols_file": None,
-        "leveraged_etf_name_patterns": ["2X", "3X", "-1X", "-2X", "-3X", "ULTRA", "ULTRAPRO",
-                                        "INVERSE", "LEVERAGED", "BULL", "BEAR", "SHORT", "VIX",
-                                        "VOLATILITY"],
-        "leveraged_etf_symbols": ["TQQQ", "SQQQ", "SOXL", "SOXS", "UPRO", "SPXU", "SPXL", "SPXS",
-                                  "TNA", "TZA", "LABU", "LABD", "FNGU", "FNGD", "NUGT", "DUST",
-                                  "UVXY", "SVXY", "VXX", "VIXY", "TSLL", "NVDL", "SSO", "SDS",
-                                  "QLD", "QID"],
-    },
+    # Universe filters mirror the real config so tests track config.yaml changes.
+    "universe": yaml.safe_load((REPO_ROOT / "config.yaml").read_text(encoding="utf-8"))["universe"],
     "risk": {
         "long_only": True,
         "max_position_pct_equity": 0.10,
@@ -78,7 +68,6 @@ BASE_CONFIG: dict[str, Any] = {
         "no_entry_minutes_before_close": 15,
     },
     "holding": {"max_hold_days": 10},
-    "notifications": {"slack_channel": "#alpaca-paper-bot"},
     "data": {"latest_feed": "iex", "bars_feed": "sip", "bars_adjustment": "split"},
 }
 

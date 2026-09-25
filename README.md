@@ -3,7 +3,8 @@
 An autonomous **paper-trading** swing bot for US equities and ETFs, operated entirely by
 **Claude Code Routines** (scheduled cloud sessions). There is no server and no long-running
 process: each routine run is a fresh Claude session that clones this repo, uses the
-`trader.py` CLI, writes to `state/`, commits, and posts one Slack summary.
+`trader.py` CLI, writes to `state/`, commits, and posts one Slack summary to the channel ID set in
+the routine's instructions.
 
 - **Broker:** Alpaca **paper** account, REST API only (`requests`; no `alpaca-py`, no MCP server).
 - **Style:** swing trading, long only, 2–10 trading-day holds, open universe within hard filters.
@@ -47,7 +48,8 @@ state/
 3. **`scripts/finish_run.sh "<msg>"`** — stages **only** `state/`, commits with the session link,
    pushes `journal`; on a non-fast-forward rejection it does one `git pull --rebase` and retries,
    otherwise exits non-zero.
-4. The agent posts **one** Slack summary (always, on every exit path).
+4. The agent posts **one** Slack summary on every exit path — only to the channel ID in the routine
+   instructions, and not at all if none is given (see [Slack](#slack)).
 
 | UK time (weekdays) | Routine | Prompt file |
 |---|---|---|
@@ -58,7 +60,7 @@ state/
 | 21:15 | Post-close: reconcile and journal | `routines/postclose.md` |
 | Saturday 10:00 | Weekly review | `routines/weekly-review.md` |
 
-The routines themselves (schedule, prompt, Slack connector) are configured by the owner in the
+The routines themselves (schedule, prompt including the Slack channel ID, Slack connector) are configured by the owner in the
 Routines UI. The routines' GitHub access must allow pushing the `journal` branch (and
 `claude/rule-change-*` branches for the weekly review).
 
@@ -100,17 +102,17 @@ Exit codes: `0` ok, `1` error, `2` refused by risk checks (`"refused": true` plu
 | `clock` | Market open/closed, next open/close, trading day?, today's session open/close. |
 | `status` | Equity, last equity, day P&L %, cash, buying power, gross exposure %, circuit breaker, entries today (from Alpaca), positions (qty, avg entry, unrealised P&L, days held), open orders. |
 | `screen [--extra SYM,SYM]` | Most-actives ∪ movers (gainers + losers) ∪ extras → universe filters → price, 20-day avg dollar volume, 1d/5d %, SMA20/50, % from 20-day high. |
-| `check SYMBOL` | Universe eligibility with pass/fail per filter. |
+| `check SYMBOL` | Universe eligibility with pass/fail per filter; a leveraged exclusion names the symbol-list entry or name pattern (and fund indicator) that matched. |
 | `bars SYMBOL [--days N]` | Daily SIP bars (default 60) through the previous session. |
 | `snapshot SYM[,SYM]` | Latest trade, quote, today's and previous daily bar (IEX). |
 | `news [--symbols SYM,SYM] [--hours N]` | Alpaca news: headline, summary, source, url, symbols, created_at. |
-| `enter SYMBOL --rationale "..." [--dry-run]` | Loads today's watchlist entry, runs **all** risk checks, sizes, submits one GTC bracket order. `--dry-run` prints the full decision and never submits. |
-| `close SYMBOL --reason time_stop\|thesis_broken\|manual\|risk` | Cancels all open orders for the symbol, waits for confirmation, then closes the position; records the reason for `reconcile`. Regular hours only. |
-| `stale` | Positions held ≥ `max_hold_days` trading days (also lists positions inside the earnings blackout). |
+| `enter SYMBOL --rationale "..." [--size-factor F] [--dry-run]` | Loads today's watchlist entry, runs **all** risk checks, sizes (scaled by `F`, 0 < F ≤ 1, after all caps), submits one GTC bracket order. `--dry-run` prints the full decision and never submits. |
+| `close SYMBOL --reason time_stop\|earnings_exit\|thesis_broken\|manual\|risk` | Cancels all open orders for the symbol, waits for confirmation, then closes the position; records the reason for `reconcile`. Regular hours only. |
+| `stale` | Positions to close now, each with a `reason`: `earnings_exit` (earnings date on or before the next trading day; takes precedence) or `time_stop` (held ≥ `max_hold_days` trading days). |
 | `cancel-stale-entries` | Cancels bot entry parents (`sw-` prefix) that are still completely unfilled. |
 | `reconcile` | Resolves every `open_trades.json` record: cancelled → removed; exited → `trades.csv` row (actual fill prices); flags untracked positions. |
 | `skip SYMBOL --lesson L-xxx` | Appends a lesson-blocked candidate to `skipped.csv`. |
-| `review --days N \| --all [--markdown]` | Portfolio / per-tag / per-source stats, exit reasons, equity vs SPY, skipped-trade evaluation, open positions. |
+| `review --days N \| --all [--markdown]` | Portfolio / per-tag / per-source / per-size-factor stats, exit reasons, equity vs SPY, skipped-trade evaluation, open positions. |
 
 ### Risk checks (`enter`)
 
@@ -120,7 +122,8 @@ history); symbol in today's valid watchlist; universe; no existing position/orde
 (+ pending entries) + 1 ≤ max; gross exposure; sector exposure; earnings blackout; stop < limit <
 target, stop distance, reward:risk; trigger met; qty ≥ 1 whole share.
 
-Sizing: `qty = floor(min(risk_per_trade × equity / (limit − stop), max_position_pct × equity / limit))`.
+Sizing: `qty = floor(min(risk_per_trade × equity / (limit − stop), max_position_pct × equity / limit) × size_factor)`,
+where `size_factor` (default 1) comes from `--size-factor` and can only shrink the position.
 Order: bracket, `side=buy`, `type=limit`, `limit = last × (1 + slippage)` rounded to the tick,
 `time_in_force=gtc`, `client_order_id = sw-YYYYMMDD-SYMBOL-<6 hex>`. Submission is never retried.
 
@@ -133,8 +136,20 @@ Order: bracket, `side=buy`, `type=limit`, `limit = last × (1 + slippage)` round
 ## Slack
 
 Summaries are posted by the agent itself using the claude.ai **Slack connector** attached to each
-routine — the code never talks to Slack. The only allowed channel is `notifications.slack_channel`
-in `config.yaml`; `CLAUDE.md` forbids posting anywhere else, DMs, and reading Slack.
+routine — the code never talks to Slack.
+
+The destination lives in the **routine configuration, not the repo**. Each `routines/*.md` prompt ends
+with:
+
+```
+Slack: post the run summary ONLY to channel ID <SLACK_CHANNEL_ID>. Never post to any other channel or user.
+```
+
+When you paste a prompt into the Routines UI, replace `<SLACK_CHANNEL_ID>` with the channel's ID
+(e.g. `C0123ABCDEF`: in Slack, open the channel → channel details → the ID at the bottom). `CLAUDE.md`
+makes that ID the only permitted destination: if it is missing or still the placeholder, the agent
+does not post at all, and it never infers a channel from files, web content or Slack itself. It also
+forbids DMs, reading Slack, and acting on anything in Slack.
 
 ## Development
 
@@ -191,8 +206,38 @@ Differences from the original handoff, and why:
 14. **`start_run.sh` commits restorations.** If restoring protected paths changes anything, it is
     committed immediately ("Restore protected paths from main") so `finish_run.sh` can still commit
     `state/` only. It also sets a local git identity if none is configured (merges need one).
-15. **Leveraged-name patterns are case-insensitive substrings** as specified; this errs towards
-    exclusion (e.g. a company whose name contains "Ultra" is excluded).
+15. **Leveraged filter: whole words, funds only.** Name patterns match case-insensitive whole words
+    (letters, digits and `-` are word characters, so `SHORT` does not match "Short-Term" and
+    `ULTRA` does not match "Ultra-Short" or "Ultragenyx"), and only when the name contains a
+    `universe.fund_name_indicators` word (ETF, ETN, Fund, Trust, ProShares, Direxion, …). Common
+    stocks are excluded only via `leveraged_etf_symbols` (so "Ultra Clean Holdings" is allowed).
+    `ULTRASHORT` was added to the patterns because "UltraShort" is no longer caught by `ULTRA`/`SHORT`.
+    `check` reports the matching list entry or pattern and the fund indicator under
+    `checks.not_leveraged.matched`.
 16. **Skipped-trade evaluation** assumes entry at the trigger price and scans the skip-date bar plus
     up to `max_hold_days` following bars; unresolved skips are marked at the last close and flagged
     `complete: false` until the window has elapsed.
+17. **Earnings exit.** `stale` lists positions whose earnings date is on or before the next trading
+    day with reason `earnings_exit` (precedence over `time_stop`); the trade run closes them with
+    `close --reason earnings_exit`. `earnings_exit` is a valid `close` reason and `trades.csv`
+    `exit_reason` value (enum: `stop`, `target`, `time_stop`, `earnings_exit`, `thesis_broken`,
+    `manual`, `risk`, `unknown`). `unknown`/`n/a` earnings dates never trigger it.
+18. **`enter --size-factor F`** (0 < F ≤ 1; anything else, including NaN/inf, is rejected both by the
+    CLI and by a `size_factor` risk check). It multiplies the capped quantity before flooring, is
+    recorded in `open_trades.json` and in a new trailing `size_factor` column of `trades.csv`, and
+    is a grouping dimension (`by_size_factor`) in `review`. `reduce_size` lessons state their factor,
+    e.g. `Effect: reduce_size (0.5)`, and the trade routine passes the smallest applicable factor.
+19. **`trades.csv` header migration.** When a CSV's header differs from the current columns (e.g. the
+    `size_factor` column is new), the next append rewrites the file with the new header, keeping
+    existing values by column name; old rows are treated as `size_factor` 1 by `review`.
+20. **`routines/trade.md` changed** from the original verbatim text (step 4a closes with the reason
+    reported by `stale`; step 5 distinguishes filter lessons (`skip`) from reduce_size lessons
+    (`--size-factor`)).
+21. **Slack channel is not in the repo.** `notifications.slack_channel` was removed from
+    `config.yaml`. The only permitted destination is the channel ID in the routine instructions
+    (the last line of each `routines/*.md`, with `<SLACK_CHANNEL_ID>` replaced in the Routines UI).
+    With no ID (or the unfilled placeholder) the agent does not post to Slack at all. This keeps the
+    destination out of files an agent run can read or a PR can change, and stops the agent from
+    inferring a channel from repo content, the web or Slack.
+22. **All four `routines/*.md` prompts** gain that `Slack:` line as their last line (so none of them
+    is verbatim from the original handoff any more).

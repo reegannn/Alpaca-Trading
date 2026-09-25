@@ -62,3 +62,30 @@ def test_round_to_tick() -> None:
 def test_entry_limit_price() -> None:
     assert entry_limit_price(50.0, 0.003) == 50.15
     assert entry_limit_price(123.45, 0.003) == 123.82
+
+
+def test_size_factor_applied_after_cap(config: dict[str, Any]) -> None:
+    # cap-limited 100 shares, then x 0.5
+    r = size_position(100_000, 100.0, 99.0, config["risk"], size_factor=0.5)
+    assert r.qty == 50 and r.binding == "position_cap" and r.size_factor == 0.5
+
+
+def test_size_factor_applied_after_risk_limit(config: dict[str, Any]) -> None:
+    # risk-limited 50 shares, then x 0.333 -> floor(16.65) = 16
+    r = size_position(100_000, 100.0, 80.0, config["risk"], size_factor=0.333)
+    assert r.qty == 16 and r.binding == "risk"
+
+
+def test_size_factor_one_is_unchanged(config: dict[str, Any]) -> None:
+    assert size_position(100_000, 100.0, 80.0, config["risk"], size_factor=1.0).qty == 50
+
+
+@pytest.mark.parametrize("factor", [0.0, -0.1, 1.0001, float("nan"), float("inf"), True])
+def test_invalid_size_factor_gives_zero(config: dict[str, Any], factor: Any) -> None:
+    r = size_position(100_000, 100.0, 80.0, config["risk"], size_factor=factor)
+    assert r.qty == 0 and not r.ok and "size_factor" in (r.reason or "")
+
+
+def test_size_factor_can_reduce_below_one_share(config: dict[str, Any]) -> None:
+    r = size_position(100_000, 100.0, 80.0, config["risk"], size_factor=0.01)   # 50 x 0.01
+    assert r.qty == 0 and not r.ok

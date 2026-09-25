@@ -79,10 +79,17 @@ def trade_stats(rows: list[dict[str, str]]) -> dict[str, Any]:
     }
 
 
+def size_factor_key(row: dict[str, str]) -> str:
+    """Normalised size_factor label; rows from before the column existed count as 1."""
+    v = _f(row.get("size_factor"))
+    return f"{(1.0 if v is None else v):g}"
+
+
 def grouped_stats(rows: list[dict[str, str]], key: str) -> dict[str, dict[str, Any]]:
     groups: dict[str, list[dict[str, str]]] = {}
     for r in rows:
-        groups.setdefault(r.get(key) or "(none)", []).append(r)
+        label = size_factor_key(r) if key == "size_factor" else (r.get(key) or "(none)")
+        groups.setdefault(label, []).append(r)
     return {k: trade_stats(v) for k, v in sorted(groups.items())}
 
 
@@ -209,6 +216,7 @@ def build_report(*, period_label: str, start: date | None, end: date,
         "portfolio": trade_stats(period_trades),
         "by_setup_tag": grouped_stats(period_trades, "setup_tag"),
         "by_idea_source": grouped_stats(period_trades, "idea_source"),
+        "by_size_factor": grouped_stats(period_trades, "size_factor"),
         "exit_reasons": exit_breakdown(period_trades),
         "equity": equity_change(portfolio_history),
         "spy_buy_and_hold": benchmark_return(spy_bars, bench_start),
@@ -254,6 +262,7 @@ def render_markdown(rep: dict[str, Any]) -> str:
              f"expectancy R {_fmt(p['expectancy_r'])} · total P&L {_fmt(p['total_pnl'])}", ""]
     lines += _stats_table("By setup_tag", rep["by_setup_tag"])
     lines += _stats_table("By idea_source", rep["by_idea_source"])
+    lines += _stats_table("By size_factor", rep["by_size_factor"])
     lines += ["### Exit reasons", ""]
     lines += [f"- {k}: {v}" for k, v in rep["exit_reasons"].items()] or ["- (none)"]
     lines += ["", "## Skipped trades (hypothetical, stop wins same-bar ties)", ""]

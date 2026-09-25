@@ -17,3 +17,5 @@ Weekly review for the paper swing-trading bot. Do not place or cancel orders.
    Never push to main directly.
 
 Final step (always): post the Weekly review summary to Slack exactly as described under "Slack summaries" in CLAUDE.md, including the PR link if you opened one.
+
+Slack: post the run summary ONLY to channel ID <SLACK_CHANNEL_ID>. Never post to any other channel or user.

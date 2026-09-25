@@ -142,11 +142,9 @@ def _load_today_watchlist(app: App) -> Any:
 def _position_rows(app: App, positions: list[dict[str, Any]],
                    open_trades: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
     """Positions enriched with days held (trading days) and local trade metadata."""
-    from lib.market_calendar import parse_date
-    from lib.risk import days_held
+    from lib.risk import days_held, earnings_exit_due
     cal = app.calendar(app.today - timedelta(days=120), app.today + timedelta(days=45))
     by_sym = _records_by_symbol(open_trades)
-    blackout = int(app.config["risk"]["earnings_blackout_trading_days"])
     rows = []
     for p in positions:
         sym = str(p.get("symbol", "")).upper()
@@ -157,10 +155,6 @@ def _position_rows(app: App, positions: list[dict[str, Any]],
             parent = app.client.get_order_by_client_id(cid)
             entry_time = (parent or {}).get("filled_at")
         earnings = rec.get("earnings_date")
-        earnings_soon = None
-        ed = parse_date(earnings) if isinstance(earnings, str) and earnings[:1].isdigit() else None
-        if ed is not None:
-            earnings_soon = ed >= app.today and cal.trading_days_between(app.today, ed) <= blackout
         rows.append({
             "symbol": sym,
             "qty": _f(p.get("qty")),
@@ -178,7 +172,8 @@ def _position_rows(app: App, positions: list[dict[str, Any]],
             "stop": rec.get("stop"),
             "target": rec.get("target"),
             "earnings_date": earnings,
-            "earnings_within_blackout": earnings_soon,
+            "earnings_exit_due": earnings_exit_due(earnings, app.today, cal),
+            "size_factor": rec.get("size_factor", 1.0) if recs else None,
         })
     return rows
 
@@ -344,12 +339,16 @@ def cmd_enter(app: App, args: argparse.Namespace) -> dict[str, Any]:
     from lib.market_calendar import NY, parse_date, utc_iso
     from lib.risk import (EntryContext, build_bracket_order, evaluate_entry,
                           new_client_order_id)
+    from lib.sizing import valid_size_factor
     from lib.universe import check_universe, load_exclusions
 
     sym = args.symbol.upper()
     rationale = (args.rationale or "").strip()
     if not rationale:
         raise CommandError("--rationale is required and must not be empty")
+    size_factor = args.size_factor
+    if not valid_size_factor(size_factor):
+        raise CommandError(f"--size-factor must satisfy 0 < F <= 1 (got {size_factor!r})")
 
     wl = _load_today_watchlist(app)
     cand = wl.find(sym)
@@ -380,6 +379,7 @@ def cmd_enter(app: App, args: argparse.Namespace) -> dict[str, Any]:
         universe=check_universe(sym, asset, bars, app.config["universe"],
                                 load_exclusions(app.config["universe"], REPO_ROOT)),
         last_price=last_price, open_trades=app.state.load_open_trades(), calendar=cal,
+        size_factor=size_factor,
     )
     decision = evaluate_entry(ctx, app.config)
     result: dict[str, Any] = {"dry_run": bool(args.dry_run), "decision": decision.to_dict(),
@@ -422,6 +422,7 @@ def cmd_enter(app: App, args: argparse.Namespace) -> dict[str, Any]:
         "stop": decision.stop,
         "target": decision.target,
         "qty": decision.qty,
+        "size_factor": size_factor,
         "earnings_date": str(cand.get("earnings_date")),
         "submitted_at": utc_iso(app.now),
         "watchlist_date": app.today.isoformat(),
@@ -499,11 +500,16 @@ def cmd_close(app: App, args: argparse.Namespace) -> dict[str, Any]:
 def cmd_stale(app: App, args: argparse.Namespace) -> dict[str, Any]:
     max_hold = int(app.config["holding"]["max_hold_days"])
     rows = _position_rows(app, app.client.get_positions(), app.state.load_open_trades())
-    stale = [r for r in rows if r["days_held"] is not None and r["days_held"] >= max_hold]
+    stale = []
+    for r in rows:
+        # Earnings exit takes precedence: it is the more urgent reason to be flat.
+        if r["earnings_exit_due"]:
+            stale.append({**r, "reason": "earnings_exit"})
+        elif r["days_held"] is not None and r["days_held"] >= max_hold:
+            stale.append({**r, "reason": "time_stop"})
     unknown = [r["symbol"] for r in rows if r["days_held"] is None]
-    return {"max_hold_days": max_hold, "stale": stale,
-            "days_held_unknown": unknown,
-            "earnings_within_blackout": [r["symbol"] for r in rows if r["earnings_within_blackout"]]}
+    return {"max_hold_days": max_hold, "stale": stale, "days_held_unknown": unknown,
+            "note": "Close each stale position with `close SYMBOL --reason <reason>`."}
 
 
 def cmd_cancel_stale_entries(app: App, args: argparse.Namespace) -> dict[str, Any]:
@@ -645,6 +651,7 @@ def cmd_reconcile(app: App, args: argparse.Namespace) -> dict[str, Any]:
             "pnl": round((exit_price - entry_price) * filled_qty, 2),
             "days_held": days_held(cal, entry_dt, exit_dt.astimezone(NY).date()) if (entry_dt and exit_dt) else None,
             "rationale": rec.get("rationale"),
+            "size_factor": rec.get("size_factor", 1.0),
         }
         app.state.append_trade(row)
         closed.append(row)
@@ -775,6 +782,17 @@ COMMANDS: dict[str, Callable[[App, argparse.Namespace], Any]] = {
 }
 
 
+def _size_factor_arg(text: str) -> float:
+    from lib.sizing import valid_size_factor
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a number: {text!r}") from None
+    if not valid_size_factor(value):
+        raise argparse.ArgumentTypeError(f"must satisfy 0 < F <= 1 (got {text})")
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
     from lib.state import CLOSE_REASONS
     p = JsonArgumentParser(prog="trader.py", description="Alpaca paper swing-trading bot CLI")
@@ -807,6 +825,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("symbol")
     s.add_argument("--rationale", required=True)
     s.add_argument("--dry-run", action="store_true")
+    s.add_argument("--size-factor", type=_size_factor_arg, default=1.0,
+                   help="0 < F <= 1; scales the size down after all caps (reduce_size lessons)")
     s = add_parser("close")
     s.add_argument("symbol")
     s.add_argument("--reason", required=True, choices=list(CLOSE_REASONS))

@@ -13,7 +13,8 @@ from datetime import date, datetime, timedelta
 from typing import Any
 
 from .market_calendar import NY, Session, TradingCalendar, parse_date, parse_ts
-from .sizing import SizingResult, entry_limit_price, round_to_tick, size_position
+from .sizing import (SizingResult, entry_limit_price, round_to_tick, size_position,
+                     valid_size_factor)
 from .universe import UniverseResult
 from .watchlist import Watchlist, earnings_value
 
@@ -103,6 +104,7 @@ class EntryContext:
     last_price: float | None
     open_trades: dict[str, dict[str, Any]]
     calendar: TradingCalendar              # must cover today .. earnings date
+    size_factor: float = 1.0               # 0 < F <= 1; only ever shrinks the position
 
 
 @dataclass
@@ -146,6 +148,11 @@ def evaluate_entry(ctx: EntryContext, config: dict[str, Any]) -> EntryDecision:
     # 0. Long-only is a hard invariant of this bot.
     if not risk_cfg.get("long_only", True):
         fail("long_only", "config risk.long_only must be true; this bot only buys")
+
+    # Size factor may only shrink a position.
+    d.metrics["size_factor"] = ctx.size_factor
+    if not valid_size_factor(ctx.size_factor):
+        fail("size_factor", f"size_factor {ctx.size_factor!r} must satisfy 0 < F <= 1")
 
     # 1. Market hours with buffers after the open and before the close.
     after_open = timedelta(minutes=int(risk_cfg.get("no_entry_minutes_after_open", 15)))
@@ -201,8 +208,8 @@ def evaluate_entry(ctx: EntryContext, config: dict[str, Any]) -> EntryDecision:
         limit = entry_limit_price(ctx.last_price, float(risk_cfg["entry_limit_slippage_pct"]))
     d.stop, d.target, d.limit_price = stop, target, limit
 
-    if limit is not None and stop is not None:
-        sizing = size_position(equity, limit, stop, risk_cfg)
+    if limit is not None and stop is not None and valid_size_factor(ctx.size_factor):
+        sizing = size_position(equity, limit, stop, risk_cfg, ctx.size_factor)
         d.sizing = sizing
         if not sizing.ok:
             fail("sizing", sizing.reason or "qty < 1")
@@ -313,6 +320,34 @@ def earnings_failures(cand: dict[str, Any], today: date, calendar: TradingCalend
     if days <= blackout:
         return [f"earnings in {days} trading days (must be more than {blackout})"]
     return []
+
+
+def next_trading_day(calendar: TradingCalendar, today: date) -> date | None:
+    """First session strictly after ``today`` (None if the calendar does not reach it)."""
+    for d in calendar.days:
+        if d > today:
+            return d
+    return None
+
+
+def earnings_exit_due(earnings: Any, today: date, calendar: TradingCalendar) -> bool:
+    """True if an open position must be closed ahead of earnings.
+
+    A position is due for ``earnings_exit`` when its earnings date is on or
+    before the next trading day, so it is closed during the last session
+    before the report (or at once if the date has already arrived).
+    'unknown' / 'n/a' / unparseable values never trigger an exit.
+    """
+    ev = earnings_value(earnings)
+    if not isinstance(ev, date):
+        return False
+    nxt = next_trading_day(calendar, today)
+    if nxt is None:
+        # Calendar does not extend past today: fall back to the next weekday.
+        nxt = today + timedelta(days=1)
+        while nxt.weekday() >= 5:
+            nxt += timedelta(days=1)
+    return ev <= nxt
 
 
 def build_bracket_order(decision: EntryDecision, client_order_id: str) -> dict[str, Any]:
