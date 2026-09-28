@@ -1,0 +1,36 @@
+date: 2026-09-28
+generated_at: "2026-09-28T12:25:00Z"
+candidates:
+  - symbol: MSFT
+    asset_type: stock
+    sector: Technology
+    setup_tag: catalyst_news
+    idea_source: news_catalyst
+    thesis: "Uptrend intact, price above a rising 50-day SMA (475.8) and 20-day SMA (500.0). Friday's breakout to a new closing high (516.17, +3.66%) came on volume roughly double the recent average. Trigger requires reclaiming/holding above the breakout day's range to confirm continuation over the next 2-10 sessions; stop sits below the breakout bar's low, invalidating the setup if price falls back into the prior range."
+    catalyst: "Microsoft unveiled a redesigned Copilot 'super app' (unified chat, Office tools, code generation, autonomous Autopilot agent) aimed at converting its Microsoft 365 base into paying Copilot subscribers; Stifel upgraded MSFT to Buy on Sep 23 citing the post-Q4 turn (Azure +43%, Copilot >30M paid seats, revenue >$100B)."
+    trigger:
+      type: above
+      price: 515.00
+    stop: 495.00
+    target: 552.00
+    earnings_date: 2026-10-27
+    sources:
+      - https://www.fxleaders.com/news/2026/09/26/microsoft-stock-strong-cloud-ai-results/
+      - https://www.investing.com/news/stock-market-news/why-is-microsoft-stock-rallying-today-93CH-4917693
+      - https://www.techflowpost.com/en-US/article/34251
+  - symbol: SMCI
+    asset_type: stock
+    sector: Technology
+    setup_tag: catalyst_news
+    idea_source: news_catalyst
+    thesis: "Recovering off a multi-week base (Sep 16 low 35.36) with a sequence of higher lows into today; price is above a rising 50-day SMA (35.0) and 20-day SMA (39.0). Trigger set just above the recent multi-week range high (43.76) to confirm a genuine breakout rather than chasing the close. Stop below the last swing low; target near the prior (Jun 2026) high of 51.40, a structurally sensible resistance level."
+    catalyst: "Super Micro began shipping NVIDIA Vera Rubin NVL72 racks with its liquid-cooled Data Center Building Block Solutions on Sep 25, and guided fiscal 2027 revenue to $65-72B backed by a $60B order book."
+    trigger:
+      type: above
+      price: 43.80
+    stop: 39.50
+    target: 51.00
+    earnings_date: 2026-11-03
+    sources:
+      - https://www.benzinga.com/markets/tech/26/09/61992909/whats-going-on-with-super-micro-computer-stock-friday-4
+      - https://www.tipranks.com/stocks/smci/earnings
