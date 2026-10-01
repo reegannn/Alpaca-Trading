@@ -1,11 +1,26 @@
 #!/usr/bin/env bash
 # End-of-run: commit ONLY state/ and push the journal branch.
-# Usage: bash scripts/finish_run.sh "<message>"
+# Usage: bash scripts/finish_run.sh "<run label>"
+#   e.g. "research", "trade", "postclose", "weekly review 2026-W40", "trade: market closed".
+# Never put a time in the label: the real UTC and New York times are appended here.
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
 
-MESSAGE="${1:-routine run}"
+LABEL="${1:-routine run}"
+
+# Real clock time, same zones as `trader.py stamp`. Falls back to `date` if Python fails.
+if ! STAMP="$(python - <<'PY'
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+now = datetime.now(timezone.utc)
+ny = now.astimezone(ZoneInfo("America/New_York"))
+print(f"{now:%Y-%m-%d %H:%M:%S} UTC | {ny:%Y-%m-%d %H:%M:%S} New York ({ny:%Z})")
+PY
+)"; then
+  STAMP="$(date -u '+%Y-%m-%d %H:%M:%S') UTC | $(TZ=America/New_York date '+%Y-%m-%d %H:%M:%S') New York ($(TZ=America/New_York date '+%Z'))"
+fi
+MESSAGE="${LABEL} | ${STAMP}"
 
 BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 if [ "$BRANCH" != "journal" ]; then
@@ -26,7 +41,7 @@ if git diff --cached --quiet -- state/; then
   echo "finish_run: no state changes to commit"
 else
   # Pathspec limits the commit to state/ even if something else is staged.
-  git commit -m "$MESSAGE" -m "Session: $SESSION_LINK" -- state/
+  git commit -m "$MESSAGE" -m "Run-Label: $LABEL" -m "Session: $SESSION_LINK" -- state/
 fi
 
 if git push origin journal; then

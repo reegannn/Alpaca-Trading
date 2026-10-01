@@ -59,3 +59,13 @@ def test_trades_csv_header_migration(tmp_path: Path) -> None:
     assert [r["client_order_id"] for r in rows] == ["sw-old", "sw-new"]
     assert rows[0]["pnl"] == "12.5" and rows[0]["size_factor"] == ""
     assert rows[1]["size_factor"] == "0.5"
+
+
+def test_skip_evaluation_assumes_entry_at_zone_top() -> None:
+    from lib.review import evaluate_skip
+    bars = [{"t": "2026-09-28T04:00:00Z", "o": 100, "h": 115.5, "l": 99.5, "c": 112}]
+    row = {"date": "2026-09-28", "symbol": "XYZ", "lesson_id": "L-001", "zone_low": "99",
+           "zone_high": "100", "stop": "95", "target": "115", "setup_tag": "breakout"}
+    assert evaluate_skip(row, bars, 10)["r"] == 3.0                   # (115 - 100) / (100 - 95)
+    legacy = {k: v for k, v in row.items() if not k.startswith("zone_")} | {"trigger_price": "99"}
+    assert evaluate_skip(legacy, bars, 10)["r"] == 4.0                # (115 - 99) / (99 - 95)

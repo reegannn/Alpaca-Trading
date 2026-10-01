@@ -7,21 +7,26 @@ exits non-zero on error with ``{"ok": false, "error": "..."}``. Exception:
 
 Exit codes: 0 ok, 1 error, 2 refused by risk checks.
 
-Every invocation appends one row to state/run_log.csv (when state/ exists).
+When state/ exists, every invocation appends its full JSON output (with a
+``run_id``) to state/runs/<New York date>.jsonl, and one short index row with the
+same ``run_id`` to state/run_log.csv. Only bars/screen/scan/news outputs are
+cut to 4000 characters in the jsonl log.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import secrets
 import sys
 import time
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 REPO_ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = REPO_ROOT / "config.yaml"
@@ -95,14 +100,17 @@ class App:
             raise CommandError("could not determine the previous session close")
         return utc_iso(sess.close)
 
-    def daily_bars(self, symbols: list[str], trading_days: int) -> dict[str, list[dict[str, Any]]]:
+    def daily_bars(self, symbols: list[str], trading_days: int,
+                   batch_size: int | None = None) -> dict[str, list[dict[str, Any]]]:
         end = self.bars_end()
         start = (self.today - timedelta(days=int(trading_days * 1.5) + 10)).isoformat()
         data_cfg = self.config.get("data", {})
+        extra = {} if batch_size is None else {"batch_size": batch_size}
         bars = self.client.get_daily_bars(
             [s.upper() for s in symbols], start=start, end=end,
             feed=data_cfg.get("bars_feed", "sip"),
             adjustment=data_cfg.get("bars_adjustment", "split"),
+            **extra,
         )
         return {s: b[-trading_days:] for s, b in bars.items()}
 
@@ -142,6 +150,17 @@ def _symbols(csv_arg: str | None) -> list[str]:
     return [s.strip().upper() for s in csv_arg.split(",") if s.strip()]
 
 
+def _pct(v: float | None, nd: int = 3) -> float | None:
+    return None if v is None else round(v * 100.0, nd)
+
+
+def _rel(path: Path) -> str:
+    try:
+        return str(path.relative_to(REPO_ROOT))
+    except ValueError:
+        return str(path)
+
+
 def _order_view(o: dict[str, Any]) -> dict[str, Any]:
     keys = ("id", "client_order_id", "symbol", "side", "type", "order_class", "qty",
             "filled_qty", "filled_avg_price", "limit_price", "stop_price", "status",
@@ -160,8 +179,9 @@ def _records_by_symbol(open_trades: dict[str, dict[str, Any]]) -> dict[str, list
 
 
 def _load_today_watchlist(app: App) -> Any:
-    from lib.watchlist import load_watchlist
-    return load_watchlist(app.state.watchlist_path(app.today), app.today)
+    from lib.watchlist import ZoneRules, load_watchlist
+    return load_watchlist(app.state.watchlist_path(app.today), app.today,
+                          ZoneRules.from_config(app.config))
 
 
 def _position_rows(app: App, positions: list[dict[str, Any]],
@@ -255,7 +275,7 @@ def cmd_status(app: App, args: argparse.Namespace) -> dict[str, Any]:
 
 
 def cmd_screen(app: App, args: argparse.Namespace) -> dict[str, Any]:
-    from lib.universe import check_universe, load_exclusions, screen_metrics
+    from lib.universe import SYMBOL_PATTERN, check_universe, load_exclusions, screen_metrics
     ucfg = app.config["universe"]
     scfg = app.config.get("screen", {})
     min_price = float(ucfg["min_price"])
@@ -282,7 +302,7 @@ def cmd_screen(app: App, args: argparse.Namespace) -> dict[str, Any]:
         if sym in lev_syms:
             rejected.append({"symbol": sym, "failures": ["leveraged/volatility symbol list"]})
             continue
-        if not re.fullmatch(r"[A-Z][A-Z0-9.\-]{0,9}", sym):
+        if not SYMBOL_PATTERN.fullmatch(sym):
             rejected.append({"symbol": sym, "failures": ["unsupported symbol format"]})
             continue
         assets[sym] = app.client.get_asset(sym)
@@ -370,6 +390,154 @@ def cmd_news(app: App, args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def cmd_stamp(app: App, args: argparse.Namespace) -> dict[str, Any]:
+    """Current time in UK, New York and UTC. Journal headers and Slack times come from here."""
+    from lib.market_calendar import stamp
+    return stamp(app.now)
+
+
+def cmd_validate_watchlist(app: App, args: argparse.Namespace) -> dict[str, Any]:
+    """Fill reference_price / in_zone_at_research / generated_at, then validate every candidate.
+
+    Rewrites today's watchlist file (YAML comments are not preserved). Exits 1 with every
+    error listed if anything fails; the research run fixes or removes the failing
+    candidates and runs this again until it passes.
+    """
+    from lib.market_calendar import utc_iso
+    from lib.universe import SYMBOL_PATTERN
+    from lib.watchlist import (ZoneRules, dump_watchlist_yaml, fill_research_fields,
+                               read_watchlist_yaml, validate_watchlist, zone_metrics, zone_warnings)
+
+    rules = ZoneRules.from_config(app.config)
+    path = app.state.watchlist_path(app.today)
+    try:
+        data = read_watchlist_yaml(path)
+    except ValueError as exc:
+        raise CommandError(str(exc)) from None
+    if not isinstance(data, dict):
+        raise CommandError("watchlist file is not a mapping")
+    cands = data.get("candidates")
+    cands = cands if isinstance(cands, list) else []
+    syms = sorted({str(c.get("symbol", "")).strip().upper() for c in cands if isinstance(c, dict)} - {""})
+    queryable = [s for s in syms if SYMBOL_PATTERN.fullmatch(s)]
+    snaps = app.client.get_snapshots(queryable, feed=app.latest_feed()) if queryable else {}
+    prices = {s: _f(((snaps.get(s) or {}).get("latestTrade") or {}).get("p"), None) for s in queryable}
+
+    no_price = fill_research_fields(data, prices, utc_iso(app.now))
+    path.write_text(dump_watchlist_yaml(data), encoding="utf-8")
+    wl = validate_watchlist(data, app.today, rules, path)
+
+    unpriced = {s for s in syms if not (prices.get(s) or 0.0) > 0}
+    rows = []
+    for c in wl.candidates:
+        sym = str(c.get("symbol", ""))
+        errors = list(wl.entry_errors.get(sym, [])) if sym else ["symbol missing"]
+        if sym in unpriced:
+            # Replace the generic "run validate-watchlist" hints with the actual cause.
+            errors = [e for e in errors if not e.startswith(("reference_price missing",
+                                                             "in_zone_at_research missing"))]
+            errors.append(f"no latest trade price for {sym} on the {app.latest_feed()} feed "
+                          "(check the symbol); reference_price not set")
+        m = zone_metrics(c, rules)
+        rows.append({
+            "symbol": sym,
+            "setup_tag": c.get("setup_tag"),
+            "zone": {"low": m["zone_low"], "high": m["zone_high"]},
+            "zone_width_pct": _pct(m["zone_width"]),
+            "stop": c.get("stop"),
+            "target": c.get("target"),
+            "target_basis": c.get("target_basis"),
+            "reference_price": m["reference_price"],
+            "distance_to_zone_pct": _pct(m["distance_to_zone"]),
+            "in_zone_at_research": c.get("in_zone_at_research"),
+            "limit_at_zone_top": m["limit_at_zone_top"],
+            "reward_to_risk_at_zone_top": (None if m["reward_to_risk_at_zone_top"] is None
+                                           else round(m["reward_to_risk_at_zone_top"], 3)),
+            "stop_distance_pct_at_zone_top": _pct(m["stop_distance_at_zone_top"]),
+            "errors": errors,
+            "warnings": zone_warnings(c, rules),
+        })
+    error_count = len(wl.file_errors) + sum(len(r["errors"]) for r in rows)
+    payload = {
+        "path": _rel(path),
+        "date": app.today.isoformat(),
+        "generated_at": data["generated_at"],
+        "valid": error_count == 0,
+        "error_count": error_count,
+        "file_errors": wl.file_errors,
+        "candidate_count": len(rows),
+        "candidates": rows,
+        "rules": {"zone_min_width_pct": rules.min_width_pct, "zone_max_width_pct": rules.max_width_pct,
+                  "min_reward_to_risk": rules.min_reward_to_risk,
+                  "max_stop_distance_pct": rules.max_stop_distance_pct,
+                  "entry_limit_slippage_pct": rules.slippage_pct},
+        "unpriced_symbols": sorted(unpriced),
+        "price_notes": no_price,
+        "note": "distance_to_zone_pct: % move from reference_price to the nearest zone edge "
+                "(+ must rise, - must fall, 0 inside). The file was rewritten with reference_price, "
+                "in_zone_at_research and generated_at; YAML comments are not preserved.",
+    }
+    if error_count:
+        raise CommandError(f"watchlist has {error_count} error(s): fix or remove every failing "
+                           "candidate, then run validate-watchlist again", payload)
+    return payload
+
+
+def cmd_scan(app: App, args: argparse.Namespace) -> dict[str, Any]:
+    """Pattern scan over the most liquid eligible names (see lib/scan.py)."""
+    from lib.scan import BENCHMARK, ScanParams, analyse, rank_by_dollar_volume, universe_assets
+    from lib.universe import load_exclusions
+
+    ucfg = app.config["universe"]
+    try:
+        params = ScanParams.from_config(app.config.get("scan"))
+    except (TypeError, ValueError) as exc:
+        raise CommandError(f"config.yaml scan section: {exc}") from None
+    exclusions = load_exclusions(ucfg, REPO_ROOT)
+
+    assets = app.client.list_assets(status="active", asset_class="us_equity")
+    kept, dropped = universe_assets(assets, ucfg, exclusions, app.fractional)
+    by_sym = {str(a["symbol"]).upper(): a for a in kept}
+
+    cal = app.calendar(app.today - timedelta(days=14), app.today)
+    sess = cal.last_completed_session(app.now, min_age=timedelta(0))
+    if sess is None:
+        raise CommandError("could not determine the last completed session")
+
+    syms = sorted(by_sym)
+    snaps = (app.client.get_snapshots(syms, feed=params.snapshot_feed, batch_size=params.batch_size)
+             if syms else {})
+    ranked_all = rank_by_dollar_volume(snaps, syms, sess.day, float(ucfg["min_price"]))
+    ranked = ranked_all[:params.top_n]
+
+    wanted = list(dict.fromkeys([r["symbol"] for r in ranked] + [BENCHMARK]))
+    bars = app.daily_bars(wanted, params.bars_days, batch_size=params.batch_size)
+    result = analyse(ranked, by_sym, bars, ucfg, exclusions, app.fractional, params)
+    return {
+        "session": sess.day.isoformat(),
+        "snapshot_feed": params.snapshot_feed,
+        "bars_feed": app.config["data"].get("bars_feed", "sip"),
+        "universe": {
+            "assets": len(assets),
+            "after_static_filters": len(kept),
+            "dropped_by_static_filters": dropped,
+            "priced_at_or_above_min_price": len(ranked_all),
+            "ranked_kept": len(ranked),
+            "top_n": params.top_n,
+            "analysed": result["analysed"],
+            "ineligible_on_sip_bars": result["ineligible_on_sip_bars"],
+        },
+        "benchmark": result["benchmark"],
+        "counts": result["counts"],
+        "rows": result["rows"],
+        "warnings": result["warnings"],
+        "requests": getattr(app.client, "request_count", None),
+        "note": "Watch lists, not entry signals. Ranking uses the last completed session's "
+                f"{params.snapshot_feed} daily bar; metrics use {app.config['data'].get('bars_feed', 'sip')} "
+                "daily bars through the previous session. Strength = 20-day return vs SPY.",
+    }
+
+
 def cmd_enter(app: App, args: argparse.Namespace) -> dict[str, Any]:
     from lib.market_calendar import NY, parse_date, utc_iso
     from lib.risk import EntryContext, build_entry_order, evaluate_entry, new_client_order_id
@@ -444,6 +612,8 @@ def cmd_enter(app: App, args: argparse.Namespace) -> dict[str, Any]:
         ) from None
 
     assert cand is not None
+    from lib.watchlist import zone_bounds
+    zone = zone_bounds(cand) or (None, None)
     trades = app.state.load_open_trades()
     rec: dict[str, Any] = {
         "symbol": sym,
@@ -455,6 +625,10 @@ def cmd_enter(app: App, args: argparse.Namespace) -> dict[str, Any]:
         "rationale": rationale,
         "thesis": cand.get("thesis"),
         "planned_entry": decision.limit_price,
+        "zone_low": zone[0],
+        "zone_high": zone[1],
+        "reference_price": cand.get("reference_price"),
+        "target_basis": cand.get("target_basis"),
         "stop": decision.stop,
         "target": decision.target,
         "qty": decision.qty,
@@ -821,9 +995,13 @@ def cmd_skip(app: App, args: argparse.Namespace) -> dict[str, Any]:
     cand = wl.find(sym)
     if cand is None:
         raise CommandError(f"{sym} is not in today's watchlist")
-    trig = cand.get("trigger") or {}
+    from lib.watchlist import zone_bounds
+    bounds = zone_bounds(cand)
+    if bounds is None:
+        raise CommandError(f"{sym} has no valid entry zone in today's watchlist")
     row = {"date": app.today.isoformat(), "symbol": sym, "lesson_id": lesson,
-           "trigger_price": trig.get("price"), "stop": cand.get("stop"), "target": cand.get("target"),
+           "zone_low": bounds[0], "zone_high": bounds[1],
+           "stop": cand.get("stop"), "target": cand.get("target"),
            "setup_tag": cand.get("setup_tag"), "idea_source": cand.get("idea_source")}
     app.state.append_skipped(row)
     return {"skipped": row}
@@ -909,12 +1087,15 @@ class MarkdownOutput:
 
 COMMANDS: dict[str, Callable[[App, argparse.Namespace], Any]] = {
     "clock": cmd_clock,
+    "stamp": cmd_stamp,
     "status": cmd_status,
     "screen": cmd_screen,
+    "scan": cmd_scan,
     "check": cmd_check,
     "bars": cmd_bars,
     "snapshot": cmd_snapshot,
     "news": cmd_news,
+    "validate-watchlist": cmd_validate_watchlist,
     "enter": cmd_enter,
     "close": cmd_close,
     "stale": cmd_stale,
@@ -953,9 +1134,12 @@ def build_parser() -> argparse.ArgumentParser:
         return _add(name, parents=[common])
 
     add_parser("clock")
+    add_parser("stamp")
     add_parser("status")
     s = add_parser("screen")
     s.add_argument("--extra", default=None, help="comma-separated extra symbols")
+    add_parser("scan")
+    add_parser("validate-watchlist")
     s = add_parser("check")
     s.add_argument("symbol")
     s = add_parser("bars")
@@ -1007,15 +1191,62 @@ def _short(obj: Any, limit: int = 200) -> str:
     return text if len(text) <= limit else text[: limit - 3] + "..."
 
 
-def _log_run(state: Any, argv: list[str], command: str, ok: bool, result: Any) -> None:
+# Full output of every invocation goes to state/runs/<New York date>.jsonl. Only these
+# commands' (large, market-data) outputs are cut to LOG_TRUNCATE_CHARS characters.
+LOG_TRUNCATE_COMMANDS = frozenset({"bars", "screen", "scan", "news"})
+LOG_TRUNCATE_CHARS = 4000
+# Values of these variables are scrubbed from every log line (defence in depth: no
+# command output is supposed to contain them in the first place).
+SECRET_ENV_VARS = ("ALPACA_API_KEY", "ALPACA_SECRET_KEY", "APCA_API_KEY_ID", "APCA_API_SECRET_KEY")
+
+
+def _redact_secrets(text: str, environ: Mapping[str, str] | None = None) -> str:
+    env = os.environ if environ is None else environ
+    for name in SECRET_ENV_VARS:
+        value = (env.get(name) or "").strip()
+        if len(value) >= 4:
+            text = text.replace(value, "***")
+    return text
+
+
+def _new_run_id(now: datetime) -> str:
+    return f"{now.astimezone(timezone.utc):%Y%m%dT%H%M%SZ}-{secrets.token_hex(3)}"
+
+
+def _log_output(command: str, output: Any) -> dict[str, Any]:
+    """The output fields of a jsonl record: the full output, or a cut JSON string."""
+    text = output if isinstance(output, str) else json.dumps(
+        output, default=_json_default, ensure_ascii=False, separators=(",", ":"))
+    if command in LOG_TRUNCATE_COMMANDS and len(text) > LOG_TRUNCATE_CHARS:
+        return {"output": text[:LOG_TRUNCATE_CHARS], "output_truncated": True, "output_chars": len(text)}
+    return {"output": output, "output_truncated": False}
+
+
+def _log_run(state: Any, argv: list[str], command: str, ok: bool, summary: Any, *,
+             output: Any = None, started: datetime | None = None, run_id: str = "",
+             exit_code: int | None = None) -> None:
+    """Append the full record to state/runs/<date>.jsonl and an index row to run_log.csv."""
     if state is None or not state.exists():
         return
+    from lib.market_calendar import ny_today, utc_iso
+    finished = datetime.now(timezone.utc)
+    started = started or finished
+    args_text = " ".join(argv[1:]) if len(argv) > 1 else ""
+    # Two independent writes: a failure in one must not lose the other (or break the command).
     try:
-        from lib.market_calendar import utc_iso
+        record = {"run_id": run_id, "started_at": utc_iso(started), "finished_at": utc_iso(finished),
+                  "subcommand": command, "args": args_text, "ok": ok, "exit_code": exit_code,
+                  **_log_output(command, output)}
+        line = _redact_secrets(json.dumps(record, default=_json_default, ensure_ascii=False))
+        state.append_run_record(ny_today(started), line)
+    except Exception:  # noqa: BLE001 - logging must never break the command
+        pass
+    try:
         state.append_run_log({
-            "timestamp": utc_iso(), "subcommand": command,
-            "args": _short(" ".join(argv[1:]) if len(argv) > 1 else "", 300),
-            "ok": "true" if ok else "false", "result": _short(result),
+            "timestamp": utc_iso(finished), "subcommand": command,
+            "args": _redact_secrets(_short(args_text, 300)),
+            "ok": "true" if ok else "false", "result": _redact_secrets(_short(summary)),
+            "run_id": run_id,
         })
     except Exception:  # noqa: BLE001 - logging must never break the command
         pass
@@ -1032,20 +1263,22 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_ERROR
     indent = 2 if args.pretty else None
 
+    started = datetime.now(timezone.utc)
+    run_id = _new_run_id(started)
     state = None
     code = EXIT_OK
     payload: Any
     try:
-        from lib.market_calendar import now_utc
         from lib.state import StateStore, load_config
         state = StateStore(STATE_DIR)
         config = load_config(CONFIG_PATH)
         # Importing the client runs the paper guard.
         from lib.alpaca_client import AlpacaClient
-        app = App(config=config, state=state, client=AlpacaClient(), now=now_utc())
+        app = App(config=config, state=state, client=AlpacaClient(), now=started)
         result = COMMANDS[args.command](app, args)
         if isinstance(result, MarkdownOutput):
-            _log_run(state, argv, args.command, True, "markdown report")
+            _log_run(state, argv, args.command, True, "markdown report", output=result.text,
+                     started=started, run_id=run_id, exit_code=EXIT_OK)
             sys.stdout.write(result.text)
             return EXIT_OK
         payload = {"ok": True, "command": args.command, **(result if isinstance(result, dict) else {"result": result})}
@@ -1062,7 +1295,9 @@ def main(argv: list[str] | None = None) -> int:
         if isinstance(exc, CommandError) and exc.payload:
             payload.update({k: v for k, v in exc.payload.items() if k not in ("ok", "command", "error")})
         summary = msg
-    _log_run(state, argv, args.command, code == EXIT_OK, summary)
+    payload["run_id"] = run_id
+    _log_run(state, argv, args.command, code == EXIT_OK, summary, output=payload,
+             started=started, run_id=run_id, exit_code=code)
     print(json.dumps(payload, indent=indent, default=_json_default))
     return code
 

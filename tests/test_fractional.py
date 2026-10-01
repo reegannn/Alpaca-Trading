@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from conftest import TODAY, daily_bars, ny, utc, watchlist_data, weekday_calendar_rows
+from conftest import RULES, TODAY, daily_bars, ny, utc, watchlist_data, weekday_calendar_rows
 from lib.exits import classify_exit, exit_fills, vwap
 from lib.market_calendar import TradingCalendar, parse_ts
 from lib.protect import execute_protection, plan_protection
@@ -82,7 +82,7 @@ def small_ctx(**overrides: Any) -> EntryContext:
         session=CAL.session(TODAY),
         account={"equity": "100", "last_equity": "100", "cash": "100"},
         positions=[], open_orders=[], todays_orders=[],
-        watchlist=validate_watchlist(watchlist_data(), TODAY),
+        watchlist=validate_watchlist(watchlist_data(), TODAY, RULES),
         universe=UniverseResult("XYZ", True, {}), last_price=100.0, open_trades={}, calendar=CAL,
     )
     return replace(ctx, **overrides)

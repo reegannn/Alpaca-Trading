@@ -11,8 +11,8 @@ from typing import Any
 import pytest
 import yaml
 
-from conftest import (TODAY, candidate, daily_bars, ny, utc, watchlist_data,
-                      weekday_calendar_rows)
+from conftest import (RULES, TODAY, candidate, daily_bars, ny, utc, watchlist_data,
+                      weekday_calendar_rows, zone)
 from lib.market_calendar import TradingCalendar
 from lib.risk import (EntryContext, build_bracket_order, check_close, circuit_breaker,
                       count_entries_today, earnings_exit_due, evaluate_entry)
@@ -23,8 +23,8 @@ CAL = TradingCalendar(weekday_calendar_rows(TODAY - timedelta(days=30), TODAY + 
 
 
 def make_ctx(**overrides: Any) -> EntryContext:
-    """A context in which every check passes (limit 100, stop 95, target 115, qty 100)."""
-    wl = overrides.pop("watchlist", None) or validate_watchlist(watchlist_data(), TODAY)
+    """A context in which every check passes (zone 99-100, last/limit 100, stop 95, target 115, qty 100)."""
+    wl = overrides.pop("watchlist", None) or validate_watchlist(watchlist_data(), TODAY, RULES)
     ctx = EntryContext(
         symbol="XYZ",
         now=ny(TODAY, 11, 0),
@@ -132,13 +132,13 @@ def test_not_in_watchlist(config: dict[str, Any]) -> None:
 
 
 def test_watchlist_wrong_date(config: dict[str, Any]) -> None:
-    wl = validate_watchlist(watchlist_data(day=TODAY - timedelta(days=1)), TODAY)
+    wl = validate_watchlist(watchlist_data(day=TODAY - timedelta(days=1)), TODAY, RULES)
     d = evaluate_entry(make_ctx(watchlist=wl), config)
     assert "watchlist" in checks_failed(d)
 
 
 def test_watchlist_invalid_entry(config: dict[str, Any]) -> None:
-    wl = validate_watchlist(watchlist_data(candidate(sources=[])), TODAY)
+    wl = validate_watchlist(watchlist_data(candidate(sources=[])), TODAY, RULES)
     d = evaluate_entry(make_ctx(watchlist=wl), config)
     assert "watchlist" in checks_failed(d)
 
@@ -215,13 +215,13 @@ def test_other_sector_not_counted(config: dict[str, Any]) -> None:
     ("n/a", False),               # n/a is ETF-only
 ])
 def test_earnings_stock(config: dict[str, Any], earnings: Any, ok: bool) -> None:
-    wl = validate_watchlist(watchlist_data(candidate(earnings_date=earnings)), TODAY)
+    wl = validate_watchlist(watchlist_data(candidate(earnings_date=earnings)), TODAY, RULES)
     d = evaluate_entry(make_ctx(watchlist=wl), config)
     assert ("earnings" not in checks_failed(d)) is ok
 
 
 def test_earnings_etf_na_allowed(config: dict[str, Any]) -> None:
-    wl = validate_watchlist(watchlist_data(candidate(asset_type="etf", earnings_date="n/a")), TODAY)
+    wl = validate_watchlist(watchlist_data(candidate(asset_type="etf", earnings_date="n/a")), TODAY, RULES)
     d = evaluate_entry(make_ctx(watchlist=wl), config)
     assert d.passed, d.failures
 
@@ -229,16 +229,16 @@ def test_earnings_etf_na_allowed(config: dict[str, Any]) -> None:
 # ----------------------------------------------------------------- 11. prices
 
 def test_stop_distance_boundary(config: dict[str, Any]) -> None:
-    ok_wl = validate_watchlist(watchlist_data(candidate(stop=88.0, target=118.0)), TODAY)
+    ok_wl = validate_watchlist(watchlist_data(candidate(stop=88.0, target=118.0)), TODAY, RULES)
     assert "prices" not in checks_failed(evaluate_entry(make_ctx(watchlist=ok_wl), config))
-    bad_wl = validate_watchlist(watchlist_data(candidate(stop=87.99, target=130.0)), TODAY)
+    bad_wl = validate_watchlist(watchlist_data(candidate(stop=87.99, target=130.0)), TODAY, RULES)
     assert "prices" in checks_failed(evaluate_entry(make_ctx(watchlist=bad_wl), config))
 
 
 def test_reward_to_risk_boundary(config: dict[str, Any]) -> None:
-    ok_wl = validate_watchlist(watchlist_data(candidate(target=107.5)), TODAY)   # R:R exactly 1.5
+    ok_wl = validate_watchlist(watchlist_data(candidate(target=107.5)), TODAY, RULES)   # R:R exactly 1.5
     assert "prices" not in checks_failed(evaluate_entry(make_ctx(watchlist=ok_wl), config))
-    bad_wl = validate_watchlist(watchlist_data(candidate(target=107.49)), TODAY)
+    bad_wl = validate_watchlist(watchlist_data(candidate(target=107.49)), TODAY, RULES)
     assert "prices" in checks_failed(evaluate_entry(make_ctx(watchlist=bad_wl), config))
 
 
@@ -252,17 +252,53 @@ def test_no_last_price(config: dict[str, Any]) -> None:
     assert {"prices", "trigger"} <= checks_failed(d)
 
 
-# ---------------------------------------------------------------- 12. trigger
+# ----------------------------------------------------------- 12. entry zone
 
-def test_trigger_above_boundary(config: dict[str, Any]) -> None:
-    assert "trigger" not in checks_failed(evaluate_entry(make_ctx(last_price=100.0), config))
-    assert "trigger" in checks_failed(evaluate_entry(make_ctx(last_price=99.99), config))
+@pytest.mark.parametrize("last,inside", [
+    (99.0, True),      # exactly the zone low
+    (99.5, True),      # mid-zone
+    (100.0, True),     # exactly the zone high
+    (98.99, False),    # 1 cent below the low
+    (100.01, False),   # 1 cent above the high
+])
+def test_entry_zone_boundaries(config: dict[str, Any], last: float, inside: bool) -> None:
+    d = evaluate_entry(make_ctx(last_price=last), config)
+    assert ("trigger" not in checks_failed(d)) is inside
 
 
-def test_trigger_below_boundary(config: dict[str, Any]) -> None:
-    wl = validate_watchlist(watchlist_data(candidate(trigger={"type": "below", "price": 100.0})), TODAY)
-    assert "trigger" not in checks_failed(evaluate_entry(make_ctx(watchlist=wl, last_price=100.0), config))
-    assert "trigger" in checks_failed(evaluate_entry(make_ctx(watchlist=wl, last_price=100.01), config))
+def test_enter_inside_zone_passes_every_check(config: dict[str, Any]) -> None:
+    d = evaluate_entry(make_ctx(last_price=99.5), config)
+    assert d.passed, d.failures
+    assert d.limit_price == 99.5
+
+
+def test_zone_refusal_reasons_name_the_side(config: dict[str, Any]) -> None:
+    above = evaluate_entry(make_ctx(last_price=100.5), config)
+    below = evaluate_entry(make_ctx(last_price=98.0), config)
+    [why_above] = [f["reason"] for f in above.failures if f["check"] == "trigger"]
+    [why_below] = [f["reason"] for f in below.failures if f["check"] == "trigger"]
+    assert "above zone high" in why_above and "below zone low" in why_below
+
+
+def test_old_single_price_trigger_cannot_be_entered(config: dict[str, Any]) -> None:
+    wl = validate_watchlist(watchlist_data(candidate(trigger={"type": "above", "price": 100.0})), TODAY, RULES)
+    d = evaluate_entry(make_ctx(watchlist=wl, last_price=100.0), config)
+    assert {"watchlist", "trigger"} <= checks_failed(d)
+
+
+def test_unvalidated_candidate_cannot_be_entered(config: dict[str, Any]) -> None:
+    c = candidate()
+    del c["reference_price"], c["in_zone_at_research"]
+    d = evaluate_entry(make_ctx(watchlist=validate_watchlist(watchlist_data(c), TODAY, RULES)), config)
+    assert "watchlist" in checks_failed(d)
+
+
+def test_zone_failing_validation_cannot_be_entered(config: dict[str, Any]) -> None:
+    # 99-104 is 5.05% wide (> 3%): last 100 is inside, but the watchlist entry is invalid.
+    wl = validate_watchlist(watchlist_data(candidate(trigger=zone(99.0, 104.0), target=130.0)), TODAY, RULES)
+    d = evaluate_entry(make_ctx(watchlist=wl, last_price=100.0), config)
+    assert "trigger" not in checks_failed(d)
+    assert "watchlist" in checks_failed(d)
 
 
 # ---------------------------------------------------------------- sizing/other
@@ -289,7 +325,7 @@ def test_all_failures_reported(config: dict[str, Any]) -> None:
         account={"equity": "97000", "last_equity": "100000"},
         todays_orders=[bot_order("A", utc(ny(TODAY, 10, 0))), bot_order("B", utc(ny(TODAY, 10, 1)))],
         positions=[position("XYZ", 1000)] + [position(f"P{i}", 100) for i in range(8)],
-        last_price=99.0,
+        last_price=98.0,     # below the 99-100 zone
     )
     failed = checks_failed(evaluate_entry(ctx, config))
     assert {"market_hours", "circuit_breaker", "daily_entry_limit", "existing_position",
@@ -439,6 +475,42 @@ def test_enter_refused_does_not_submit(tmp_path: Path, config: dict[str, Any]) -
     with pytest.raises(trader.Refused):
         trader.cmd_enter(app, argparse.Namespace(symbol="XYZ", rationale="x", dry_run=False, size_factor=1.0))
     assert client.submitted == []
+
+
+@pytest.mark.parametrize("last,side", [(100.01, "above zone high"), (98.99, "below zone low")])
+def test_enter_refused_outside_zone(tmp_path: Path, config: dict[str, Any], last: float, side: str) -> None:
+    import trader
+
+    class Priced(FakeClient):
+        def get_snapshots(self, symbols: list[str], feed: str = "iex") -> dict[str, Any]:
+            return {s: {"latestTrade": {"p": last}} for s in symbols}
+
+    client = Priced()
+    app = _app(tmp_path, config, client)
+    with pytest.raises(trader.Refused) as info:
+        trader.cmd_enter(app, argparse.Namespace(symbol="XYZ", rationale="x", dry_run=False, size_factor=1.0))
+    failures = info.value.payload["decision"]["failures"]
+    assert [f["check"] for f in failures] == ["trigger"]
+    assert side in failures[0]["reason"]
+    assert client.submitted == []
+    assert app.state.load_open_trades() == {}
+
+
+def test_enter_inside_zone_records_zone(tmp_path: Path, config: dict[str, Any]) -> None:
+    import trader
+
+    class Priced(FakeClient):
+        def get_snapshots(self, symbols: list[str], feed: str = "iex") -> dict[str, Any]:
+            return {s: {"latestTrade": {"p": 99.2}} for s in symbols}
+
+    client = Priced()
+    app = _app(tmp_path, config, client)
+    trader.cmd_enter(app, argparse.Namespace(symbol="XYZ", rationale="in zone", dry_run=False, size_factor=1.0))
+    [order] = client.submitted
+    assert order["limit_price"] == "99.20"
+    rec = app.state.load_open_trades()[order["client_order_id"]]
+    assert (rec["zone_low"], rec["zone_high"]) == (99.0, 100.0)
+    assert rec["target_basis"] == "prior_high" and rec["reference_price"] == 101.0
 
 
 def test_submit_error_not_retried(tmp_path: Path, config: dict[str, Any]) -> None:

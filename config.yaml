@@ -51,6 +51,14 @@ risk:
   no_entry_minutes_after_open: 15
   no_entry_minutes_before_close: 15
 
+entry:
+  # Watchlist entry zones: trigger {type: zone, low, high}; a trade run enters only while
+  # low <= last price <= high. `validate-watchlist` (research) and `enter` require the zone
+  # width, (high - low) / low, to lie within these bounds, and reward:risk and stop distance
+  # (risk section) to hold at the zone top, high x (1 + entry_limit_slippage_pct).
+  zone_min_width_pct: 0.005
+  zone_max_width_pct: 0.03
+
 holding:
   max_hold_days: 10                    # trading days
 
@@ -65,3 +73,12 @@ data:
 screen:
   most_actives_top: 50                 # Alpaca allows 1-100
   movers_top: 25                       # Alpaca allows 1-50 (gainers and losers each)
+
+scan:
+  top_n: 300                           # most liquid names kept (by last-session dollar volume)
+  bars_days: 70                        # SIP daily bars per symbol (SMA50 + 5-day slope needs 55)
+  snapshot_feed: iex                   # feed for the ranking snapshots (see README "Spec deviations")
+  batch_size: 100                      # symbols per snapshots / bars request (max 100)
+  breakout_max_below_high_pct: 0.03    # breakout_watch: close within 3% below the 20-day high
+  pullback_max_from_sma20_pct: 0.02    # pullback_watch: close within 2% of the 20-day SMA
+  rs_top_fraction: 0.10                # relative_strength: top decile of 20-day return vs SPY

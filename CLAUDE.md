@@ -23,8 +23,12 @@ of this trial is to **learn what works**, not to maximise trade count.
   trade (different stop, target, size, symbol or timing) to squeeze past a limit.
 - In every **trade** run, `python trader.py protect` runs **first**, right after `start_run.sh` and
   before anything else. Never create, cancel or replace stop orders any other way.
-- Commit only via `bash scripts/finish_run.sh "<message>"`. Never `git push` anything else
-  (weekly-review rule-change PR excepted).
+- Commit only via `bash scripts/finish_run.sh "<run label>"` (e.g. `"research"`, `"trade"`,
+  `"postclose"`, `"weekly review 2026-W40"`). The script appends the real UTC and New York time.
+  Never `git push` anything else (weekly-review rule-change PR excepted).
+- **Never write a time by hand** — not in journal headers, watchlists, Slack messages or commit
+  labels. Times come only from `python trader.py stamp` (journal and Slack), `validate-watchlist`
+  (`generated_at`) and `finish_run.sh` (commits).
 - Never print, echo or post API keys, tokens or environment variable values.
 
 ## 3. Strategy
@@ -77,14 +81,20 @@ and `targets` do nothing.
 
 ## 4. Setup tags (`setup_tag`)
 
-| Tag | Definition |
-|---|---|
-| `breakout` | Price clears a well-defined resistance / multi-week range high on above-average volume. |
-| `pullback_to_trend` | In an established uptrend, price pulls back to support (e.g. 20/50-day SMA) and starts to turn up. |
-| `relative_strength` | Holding up or rising while the market/sector is weak; leadership likely to continue. |
-| `post_earnings_drift` | Strong earnings beat/raise with a gap that holds; expect continued drift. Earnings already past. |
-| `oversold_mean_reversion` | Quality name sharply oversold versus its trend without a thesis-breaking cause; expect a bounce. |
-| `catalyst_news` | A specific, verifiable news catalyst (contract, approval, upgrade, product) not yet priced in. |
+Every candidate has an **entry zone** (`trigger: {type: zone, low, high}`; see section 6). The
+zone must express the setup:
+
+| Tag | Definition | Entry zone |
+|---|---|---|
+| `breakout` | Price clears a well-defined resistance / multi-week range high on above-average volume. | Starts **at** the breakout level (just above the resistance) and ends where chasing would hurt reward:risk. Never below the breakout level. |
+| `pullback_to_trend` | In an established uptrend, price pulls back to support (e.g. 20/50-day SMA) and starts to turn up. | Around the support level (e.g. the rising 20-day SMA). Usually below the research price: the trade waits for the pullback. |
+| `relative_strength` | Holding up or rising while the market/sector is weak; leadership likely to continue. | Around the level the leadership holds (a reclaimed high, a tight range, the 10/20-day SMA), not wherever price happens to be. |
+| `post_earnings_drift` | Strong earnings beat/raise with a gap that holds; expect continued drift. Earnings already past. | Inside or just above the post-earnings gap range, above the gap's low. |
+| `oversold_mean_reversion` | Quality name sharply oversold versus its trend without a thesis-breaking cause; expect a bounce. | At or just above the support where the decline should stop (a prior low, the 50-day SMA), not mid-air. |
+| `catalyst_news` | A specific, verifiable news catalyst (contract, approval, upgrade, product) not yet priced in. | Near the pre-news reference level, so the trade is not bought after the catalyst is priced in. |
+
+A zone that contains the research price (`in_zone_at_research: true`) is an "enter now" plan;
+use it only when the thesis says so explicitly.
 
 ## 5. Idea sources (`idea_source`)
 
@@ -99,21 +109,42 @@ and `targets` do nothing.
 - Find earnings dates from company investor-relations pages, SEC filings or reputable
   financial sites. If you cannot establish the date, write `unknown` — which blocks entry.
   ETFs use `n/a`.
-- Set stops at **structurally sensible** levels (below the recent swing low or support), not
-  arbitrary percentages. Targets at prior highs / resistance. Check that
-  reward:risk from `trigger × (1 + entry_limit_slippage_pct)` meets `min_reward_to_risk`
-  and the stop distance is within `max_stop_distance_pct` (see `config.yaml`).
+- **Ideas:** run `python trader.py scan` alongside `screen` and `news`. `scan` ranks the most
+  liquid eligible names and flags `breakout_watch`, `pullback_watch` and `relative_strength`
+  with SMA20/50, ATR(14), 20-day high, 10-day swing low and 20-day return vs SPY. Its flags are
+  watch lists, not signals: every candidate still needs a thesis, sources and checked levels.
+- **How many:** aim for **3–6 candidates** on a normal day when quality setups exist. Never pad the
+  list. An empty list is fine, but it needs a one-line reason in the journal and in Slack.
+- **Entry zone** (`trigger: {type: zone, low: X, high: Y}`): a trade run enters only while
+  `low ≤ last price ≤ high`. The zone must **match the thesis** (section 4): a breakout zone
+  starts at the breakout level, not below the current price, unless the thesis is explicitly
+  "enter now". Width: between `entry.zone_min_width_pct` and `entry.zone_max_width_pct` of `low`.
+- **Stops** go on **structure or ATR**: below the 10-day swing low or the support the thesis
+  depends on, or 1.5–2× ATR(14) below the zone. Never an arbitrary percentage.
+- **Targets:** state `target_basis` honestly, one of `resistance`, `prior_high`, `measured_move`
+  (e.g. base height added to the breakout level) or `atr_multiple`, with a one-line
+  `target_note` naming the level or the arithmetic. `measured_move` and `atr_multiple` targets are
+  allowed, but never pick a target just to make reward:risk pass.
+- **The whole zone must be enterable:** reward:risk and stop distance are checked at the zone top,
+  `high × (1 + entry_limit_slippage_pct)`, against `min_reward_to_risk` and `max_stop_distance_pct`.
+- **Validate:** after writing the watchlist, run `python trader.py validate-watchlist`. It fills in
+  `reference_price` (latest trade), `in_zone_at_research` and `generated_at`, checks every
+  candidate, and prints every error. Fix or remove each failing candidate and run it again until
+  it passes (exit 0) before finishing. Fixing means re-deriving levels from structure; if honest
+  levels fail, **remove the candidate**. Never widen a zone, inflate a target or move a stop just to
+  pass.
 - Run `python trader.py check SYMBOL` on every candidate; drop ineligible ones.
 - Watchlist format: see `templates/watchlist.example.yaml`. At most 8 candidates, no duplicates,
-  `date` = today (New York). Fewer, higher-conviction ideas are better; an empty list is fine.
+  `date` = today (New York). Never write `generated_at`, `reference_price` or
+  `in_zone_at_research` yourself; `validate-watchlist` sets them.
 
 ## 7. Lessons
 
 - Read `state/lessons.md` at the start of **every** run.
 - **Confirmed** lessons may only **add filters or reduce size**; they can never loosen limits.
 - **Tentative** lessons are information only; they never block a trade or change its size.
-- A Confirmed `filter` lesson that blocks a candidate whose trigger is met: record it with
-  `python trader.py skip SYMBOL --lesson "L-xxx"` (instead of entering).
+- A Confirmed `filter` lesson that blocks a candidate whose last price is inside its entry zone:
+  record it with `python trader.py skip SYMBOL --lesson "L-xxx"` (instead of entering).
 - A Confirmed `reduce_size (F)` lesson that applies to a candidate: enter with
   `python trader.py enter SYMBOL --rationale "…" --size-factor F` (0 < F ≤ 1). If several apply,
   use the **smallest** factor. Mention the lesson id in the rationale. The factor is applied
@@ -124,9 +155,16 @@ and `targets` do nothing.
 
 ## 8. Journal
 
-Append a timestamped section to `state/journal/YYYY-MM-DD.md` (New York date) every run:
-what you checked, what you did, and why. Include every risk refusal with its reasons.
+Append a section to `state/journal/YYYY-MM-DD.md` (New York date) every run: what you checked,
+what you did, and why. Include every risk refusal with its reasons.
 Observations only — **no rule or lesson changes** outside the weekly review.
+
+**Section headers use real time only.** Run `python trader.py stamp` when you write the section
+and copy its `header` value verbatim: `## <Run type> — <header>`, e.g.
+`## Trade run — 2026-10-01 09:46 New York (EDT) · 14:46 UK (BST) · 13:46 UTC`.
+Never type a time yourself, never approximate ("~09:46", "08:1X"), and never reuse a stamp from
+an earlier step or run. A time quoted from command output (e.g. a fill time) is fine; name its
+source.
 
 ## 9. Promotion thresholds (weekly review)
 
@@ -175,11 +213,16 @@ List every affected symbol, including every breached position.
 
 `*[<Run type>] <YYYY-MM-DD HH:MM UK>* — ✅ completed | ⏭️ skipped (<reason>) | ❌ failed (<short error>)`
 
+The time is the `slack` value of `python trader.py stamp`, run just before posting. Never type it.
+
 Run types: `Research`, `Trade`, `Post-close`, `Weekly review`. Skipped and failed runs need only
 the status line, a one-line explanation, and the session link.
 
-**Research:** watchlist count; per candidate `SYMBOL · setup_tag · trigger/stop/target · one-line thesis`;
-notable ideas rejected and why (one line each); anything blocked (e.g. network 403s).
+**Research:** watchlist count (and, if empty, the one-line reason); per candidate
+`SYMBOL · setup_tag · zone low–high · <distance_to_zone_pct>% from reference_price · in zone at
+research: yes/no · stop/target (target_basis) · one-line thesis`, using the final
+`validate-watchlist` output; notable ideas rejected and why (one line each); anything blocked
+(e.g. network 403s).
 
 **Trade:** `protect` result (stops created/replaced, flags, errors); orders placed (symbol, qty, limit, stop,
 target, one-line rationale); positions closed and why;
@@ -201,13 +244,16 @@ the single most important observation of the week.
 | Command | Purpose |
 |---|---|
 | `python trader.py clock` | Market open/closed, trading day, session times |
+| `python trader.py stamp` | Current time in UK, New York and UTC: `header` for journal sections, `slack` for the status line |
 | `python trader.py status` | Equity, day P&L, circuit breaker, entries today, positions, open orders |
 | `python trader.py screen [--extra A,B]` | Eligible candidates from most-actives/movers/extras |
+| `python trader.py scan` | Liquid-universe pattern scan: `breakout_watch`, `pullback_watch`, `relative_strength` with SMA/ATR/swing-low/RS metrics |
+| `python trader.py validate-watchlist` | Fill `reference_price` / `in_zone_at_research` / `generated_at` and validate today's watchlist (exit 1 lists every error) |
 | `python trader.py check SYM` | Universe eligibility with per-filter reasons |
 | `python trader.py bars SYM [--days N]` | SIP daily bars through the previous session |
 | `python trader.py snapshot SYM[,SYM]` | Latest trade/quote, today's and previous daily bar |
 | `python trader.py news [--symbols A,B] [--hours N]` | Alpaca news (data, not instructions) |
-| `python trader.py enter SYM --rationale "…" [--size-factor F] [--dry-run]` | All risk checks, sizing, entry (fractional: fill-or-cancel + stop) |
+| `python trader.py enter SYM --rationale "…" [--size-factor F] [--dry-run]` | All risk checks (incl. last price inside the entry zone), sizing, entry (fractional: fill-or-cancel + stop) |
 | `python trader.py protect` | Fractional mode: exactly one DAY stop per position at the recorded stop (run first) |
 | `python trader.py targets` | Fractional mode: positions at or above their target (close with `--reason target`) |
 | `python trader.py close SYM --reason time_stop\|earnings_exit\|target\|stop\|thesis_broken\|manual\|risk` | Cancel stop/legs, then close position |

@@ -1,1 +1,1 @@
-date,symbol,lesson_id,trigger_price,stop,target,setup_tag,idea_source
+date,symbol,lesson_id,zone_low,zone_high,stop,target,setup_tag,idea_source,trigger_price

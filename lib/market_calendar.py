@@ -12,6 +12,7 @@ from typing import Any, Iterable
 from zoneinfo import ZoneInfo
 
 NY = ZoneInfo("America/New_York")
+UK = ZoneInfo("Europe/London")
 UTC = timezone.utc
 
 # SIP data newer than 15 minutes is not available on Alpaca's free plan.
@@ -30,6 +31,29 @@ def utc_iso(dt: datetime | None = None) -> str:
 
 def ny_today(now: datetime | None = None) -> date:
     return (now or now_utc()).astimezone(NY).date()
+
+
+def stamp(now: datetime | None = None) -> dict[str, str]:
+    """The current time in UK, New York and UTC (``trader.py stamp``).
+
+    ``header`` is the text for journal section headers and ``slack`` the time for
+    the Slack status line. Times are HH:MM on the New York date; UK or UTC times
+    that fall on the next calendar day carry "(+1d)".
+    """
+    now = now or now_utc()
+    ny, uk, utc = now.astimezone(NY), now.astimezone(UK), now.astimezone(UTC)
+
+    def hm(dt: datetime) -> str:
+        return f"{dt:%H:%M}" + (" (+1d)" if dt.date() > ny.date() else "")
+
+    return {
+        "utc": utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "new_york": ny.isoformat(timespec="seconds"),
+        "uk": uk.isoformat(timespec="seconds"),
+        "new_york_date": ny.date().isoformat(),
+        "header": f"{ny:%Y-%m-%d} {ny:%H:%M} New York ({ny:%Z}) · {hm(uk)} UK ({uk:%Z}) · {hm(utc)} UTC",
+        "slack": f"{uk:%Y-%m-%d %H:%M} UK",
+    }
 
 
 def parse_ts(value: str | None) -> datetime | None:

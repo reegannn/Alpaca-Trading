@@ -17,7 +17,7 @@ from .orders import fractional_entry_order, order_mode
 from .sizing import (SizingResult, entry_limit_price, round_to_tick, size_position,
                      valid_size_factor)
 from .universe import UniverseResult
-from .watchlist import Watchlist, earnings_value
+from .watchlist import Watchlist, earnings_value, in_zone, zone_bounds
 
 CLIENT_ORDER_PREFIX = "sw-"
 OPEN_PARENT_STATUSES = {"new", "accepted", "pending_new", "partially_filled",
@@ -316,7 +316,7 @@ def evaluate_entry(ctx: EntryContext, config: dict[str, Any]) -> EntryDecision:
             if rr < min_rr - 1e-12:
                 fail("prices", f"reward:risk {rr:.2f} below min {min_rr:.2f}")
 
-    # 12. Entry trigger currently met.
+    # 12. Last price currently inside the entry zone.
     if cand is not None:
         met, why = trigger_met(cand, ctx.last_price)
         if not met:
@@ -327,20 +327,17 @@ def evaluate_entry(ctx: EntryContext, config: dict[str, Any]) -> EntryDecision:
 
 
 def trigger_met(cand: dict[str, Any], last_price: float | None) -> tuple[bool, str]:
-    trig = cand.get("trigger") or {}
-    ttype = trig.get("type")
-    tprice = trig.get("price")
+    """Entry-zone check: met only while zone low <= last price <= zone high."""
     if last_price is None:
-        return False, "no last price to evaluate trigger"
-    if not isinstance(tprice, (int, float)) or isinstance(tprice, bool):
-        return False, "trigger price invalid"
-    if ttype == "above":
-        return (last_price >= tprice,
-                f"last {last_price} {'>=' if last_price >= tprice else '<'} trigger {tprice} (above)")
-    if ttype == "below":
-        return (last_price <= tprice,
-                f"last {last_price} {'<=' if last_price <= tprice else '>'} trigger {tprice} (below)")
-    return False, f"unknown trigger type {ttype!r}"
+        return False, "no last price to evaluate the entry zone"
+    bounds = zone_bounds(cand)
+    if bounds is None:
+        return False, "entry zone missing or invalid (trigger must be {type: zone, low, high})"
+    low, high = bounds
+    if in_zone(last_price, low, high):
+        return True, f"last {last_price} inside zone {low}-{high}"
+    side = "below zone low" if last_price < low else "above zone high"
+    return False, f"last {last_price} {side} (zone {low}-{high})"
 
 
 def earnings_failures(cand: dict[str, Any], today: date, calendar: TradingCalendar,

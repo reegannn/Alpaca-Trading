@@ -1,21 +1,49 @@
-# Example watchlist. The research run writes state/watchlist/YYYY-MM-DD.yaml
-# in exactly this format. `date` must equal today's New York date.
+# Example watchlist. The research run writes state/watchlist/YYYY-MM-DD.yaml in exactly
+# this format (`date` = today's New York date), then runs `python trader.py validate-watchlist`,
+# which fills in `generated_at`, `reference_price` and `in_zone_at_research` from the real
+# clock and the latest trade, validates every candidate, and rewrites the file (comments
+# are not preserved). Fix or remove failing candidates and re-run it until it passes.
 date: 2026-09-28
-generated_at: "2026-09-28T12:05:00Z"
+generated_at: "2026-09-28T12:05:00Z"   # written by validate-watchlist; never hand-written
 candidates:
   - symbol: XYZ
     asset_type: stock            # stock | etf
     sector: Technology
     setup_tag: pullback_to_trend # must be in the CLAUDE.md list
-    idea_source: news_catalyst   # must be in the CLAUDE.md list
-    thesis: "Uptrend intact (above rising 50-day SMA); pulled back 6% to the 20-day SMA on light volume. Expect resumption toward the prior high over 2-10 days."
+    idea_source: screener        # must be in the CLAUDE.md list
+    thesis: "Uptrend intact (above a rising 50-day SMA, 20-day above 50-day). Pulling back on light volume toward the rising 20-day SMA (122.60). Enter in the 121.80-123.40 support zone; expect resumption toward the prior high over 2-10 days."
     catalyst: "New product launch confirmed in company press release; two analyst upgrades this week."
-    trigger:
-      type: above                # above = enter if last >= price; below = enter if last <= price
-      price: 123.45
-    stop: 115.00                 # below the recent swing low
-    target: 140.00               # prior high / resistance
+    trigger:                     # entry zone: a trade run enters only while low <= last <= high
+      type: zone
+      low: 121.80                # around the 20-day SMA support
+      high: 123.40               # reward:risk and stop distance are checked at high x (1 + slippage)
+    stop: 115.00                 # below the 10-day swing low (115.60), about 1.5x ATR under the zone
+    target: 140.00
+    target_basis: prior_high     # resistance | prior_high | measured_move | atr_multiple
+    target_note: "2026-08-14 high of 140.20 is the first overhead supply above the zone."
+    reference_price: 125.10      # written by validate-watchlist (latest trade at research time)
+    in_zone_at_research: false   # written by validate-watchlist
     earnings_date: 2026-10-20    # date | unknown | n/a (etf only)
     sources:
       - https://investor.example.com/press-release
       - https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0000000000
+  - symbol: ABC
+    asset_type: stock
+    sector: Industrials
+    setup_tag: breakout
+    idea_source: screener
+    thesis: "Seven-week base between 43.00 and 50.00 with three rejections at 50.00; volume rising into the range high. The zone starts at the breakout level: entry only once price clears 50.00, never below it."
+    catalyst: "Raised full-year guidance in the Q3 8-K; backlog at a record."
+    trigger:
+      type: zone
+      low: 50.05                 # just above the 50.00 range high
+      high: 51.00                # not chasing more than ~2% past the breakout level
+    stop: 47.40                  # below the 10-day swing low (47.60)
+    target: 57.00
+    target_basis: measured_move
+    target_note: "Base height 7.00 (43.00-50.00) added to the 50.00 breakout level."
+    reference_price: 49.20
+    in_zone_at_research: false
+    earnings_date: 2026-11-05
+    sources:
+      - https://investor.example.com/q3-8k

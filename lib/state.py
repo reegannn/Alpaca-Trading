@@ -20,12 +20,16 @@ TRADES_COLUMNS = [
     "size_factor",
 ]
 
+# `trigger_price` is a legacy column (single-price triggers); it stays so a header
+# migration keeps old values, and it is empty for rows written with entry zones.
 SKIPPED_COLUMNS = [
-    "date", "symbol", "lesson_id", "trigger_price", "stop", "target",
-    "setup_tag", "idea_source",
+    "date", "symbol", "lesson_id", "zone_low", "zone_high", "stop", "target",
+    "setup_tag", "idea_source", "trigger_price",
 ]
 
-RUN_LOG_COLUMNS = ["timestamp", "subcommand", "args", "ok", "result"]
+# run_log.csv is an index: one short row per invocation. The full output of the
+# same invocation is the line with the same run_id in state/runs/YYYY-MM-DD.jsonl.
+RUN_LOG_COLUMNS = ["timestamp", "subcommand", "args", "ok", "result", "run_id"]
 
 EXIT_REASONS = {"stop", "target", "time_stop", "earnings_exit", "thesis_broken", "manual",
                 "risk", "unknown"}
@@ -35,7 +39,7 @@ CLOSE_REASONS = ("time_stop", "earnings_exit", "target", "stop", "thesis_broken"
 def load_config(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as fh:
         cfg = yaml.safe_load(fh) or {}
-    for section in ("universe", "risk", "holding", "data"):
+    for section in ("universe", "risk", "holding", "data", "entry"):
         if not isinstance(cfg.get(section), dict):
             raise ValueError(f"config.yaml: missing section '{section}'")
     # Base URLs are intentionally not configurable.
@@ -74,6 +78,9 @@ class StateStore:
 
     def watchlist_path(self, d: date) -> Path:
         return self.root / "watchlist" / f"{d.isoformat()}.yaml"
+
+    def runs_jsonl(self, d: date) -> Path:
+        return self.root / "runs" / f"{d.isoformat()}.jsonl"
 
     def exists(self) -> bool:
         return self.root.is_dir()
@@ -149,6 +156,13 @@ class StateStore:
 
     def append_run_log(self, row: dict[str, Any]) -> None:
         self.append_csv(self.run_log_csv, RUN_LOG_COLUMNS, row)
+
+    def append_run_record(self, d: date, line: str) -> None:
+        """Append one already-serialised JSON line to state/runs/<d>.jsonl."""
+        path = self.runs_jsonl(d)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(line.rstrip("\n") + "\n")
 
 
 def _csv_value(v: Any) -> Any:

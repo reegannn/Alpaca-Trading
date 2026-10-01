@@ -71,9 +71,15 @@ BASE_CONFIG: dict[str, Any] = {
     },
     # Existing tests exercise whole-share bracket sizing; fractional tests set "fractional".
     "orders": {"mode": "bracket"},
+    "entry": {"zone_min_width_pct": 0.005, "zone_max_width_pct": 0.03},
     "holding": {"max_hold_days": 10},
     "data": {"latest_feed": "iex", "bars_feed": "sip", "bars_adjustment": "split"},
 }
+
+# Zone rules for BASE_CONFIG (slippage 0, so the zone-top limit is exactly `high`).
+from lib.watchlist import ZoneRules  # noqa: E402  (needs REPO_ROOT on sys.path)
+
+RULES = ZoneRules.from_config(BASE_CONFIG)
 
 
 @pytest.fixture
@@ -82,6 +88,11 @@ def config() -> dict[str, Any]:
 
 
 def candidate(**overrides: Any) -> dict[str, Any]:
+    """A valid candidate: zone 99-100 (1.01% wide), stop 95, target 115 (R:R 3 at the zone top).
+
+    ``reference_price`` 101 is above the zone, so ``in_zone_at_research`` is False. Overriding
+    ``trigger`` or ``reference_price`` without the flag recomputes the flag to stay consistent.
+    """
     c: dict[str, Any] = {
         "symbol": "XYZ",
         "asset_type": "stock",
@@ -90,14 +101,27 @@ def candidate(**overrides: Any) -> dict[str, Any]:
         "idea_source": "screener",
         "thesis": "Uptrend pullback to the 20-day SMA.",
         "catalyst": "Product launch confirmed.",
-        "trigger": {"type": "above", "price": 100.0},
+        "trigger": {"type": "zone", "low": 99.0, "high": 100.0},
         "stop": 95.0,
         "target": 115.0,
+        "target_basis": "prior_high",
+        "target_note": "August high at 115.",
+        "reference_price": 101.0,
+        "in_zone_at_research": False,
         "earnings_date": date(2026, 10, 20),
         "sources": ["https://example.com/a"],
     }
     c.update(overrides)
+    if "in_zone_at_research" not in overrides:
+        trig, ref = c.get("trigger"), c.get("reference_price")
+        if (isinstance(trig, dict) and isinstance(trig.get("low"), (int, float))
+                and isinstance(trig.get("high"), (int, float)) and isinstance(ref, (int, float))):
+            c["in_zone_at_research"] = trig["low"] <= ref <= trig["high"]
     return c
+
+
+def zone(low: float, high: float) -> dict[str, Any]:
+    return {"type": "zone", "low": low, "high": high}
 
 
 def watchlist_data(*cands: dict[str, Any], day: date = TODAY) -> dict[str, Any]:

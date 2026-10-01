@@ -140,14 +140,18 @@ def evaluate_skip(row: dict[str, str], bars: list[dict[str, Any]],
                   max_hold_days: int) -> dict[str, Any]:
     """Hypothetical outcome of a skipped trade.
 
-    Entry is assumed at the trigger price on the skip date. Bars from the skip
-    date onward (the skip-date bar plus up to ``max_hold_days`` more) are
-    scanned in order; the first bar whose low <= stop or high >= target decides
-    the outcome. If both could have happened in the same bar, the stop wins
-    (conservative). If neither is hit, the trade is marked at the last close.
+    Entry is assumed at the top of the entry zone (``zone_high``) on the skip
+    date: the worst price the trade could have been entered at, so the estimate
+    is conservative. Legacy rows without a zone use ``trigger_price``. Bars from
+    the skip date onward (the skip-date bar plus up to ``max_hold_days`` more)
+    are scanned in order; the first bar whose low <= stop or high >= target
+    decides the outcome. If both could have happened in the same bar, the stop
+    wins (conservative). If neither is hit, the trade is marked at the last close.
     """
     skip_date = parse_date(row.get("date"))
-    entry = _f(row.get("trigger_price"))
+    entry = _f(row.get("zone_high"))
+    if entry is None:
+        entry = _f(row.get("trigger_price"))
     stop = _f(row.get("stop"))
     target = _f(row.get("target"))
     base = {"date": row.get("date"), "symbol": row.get("symbol"),

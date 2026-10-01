@@ -31,7 +31,8 @@ state/
 ├── trades.csv              # one row per closed trade (from reconcile)
 ├── skipped.csv             # candidates blocked by Confirmed lessons
 ├── open_trades.json        # submitted entries awaiting exit, keyed by client_order_id
-├── run_log.csv             # one row per trader.py invocation
+├── run_log.csv             # index: one short row per trader.py invocation (with run_id)
+├── runs/YYYY-MM-DD.jsonl   # full JSON output of every invocation (same run_id), New York date
 ├── watchlist/YYYY-MM-DD.yaml
 ├── journal/YYYY-MM-DD.md
 └── weekly/YYYY-Www.md
@@ -45,9 +46,10 @@ state/
    from `origin/main` and remove any extra tracked files under them; seed missing `state/` files from
    `templates/`; print branch, HEAD and `trader.py clock`.
 2. The routine prompt (`routines/*.md`) drives `trader.py` subcommands and journal writing.
-3. **`scripts/finish_run.sh "<msg>"`** — stages **only** `state/`, commits with the session link,
-   pushes `journal`; on a non-fast-forward rejection it does one `git pull --rebase` and retries,
-   otherwise exits non-zero.
+3. **`scripts/finish_run.sh "<run label>"`** — stages **only** `state/`, commits as
+   `<label> | <UTC time> | <New York time>` (the times come from the real clock, never from the
+   agent) with `Run-Label:` and session-link trailers, pushes `journal`; on a non-fast-forward
+   rejection it does one `git pull --rebase` and retries, otherwise exits non-zero.
 4. The agent posts **one** Slack summary on every exit path — only to the channel ID in the routine
    instructions, and not at all if none is given (see [Slack](#slack)).
 
@@ -73,8 +75,10 @@ Set `ALPACA_AUTH_MODE`:
 - `env` — send those headers from `ALPACA_API_KEY` / `ALPACA_SECRET_KEY`.
 - unset — `env` if both key variables are present, otherwise `proxy`.
 
-Keys are never printed, logged, written to `run_log.csv`, or included in error messages (error
-bodies are additionally redacted of the key values).
+Keys are never printed, logged, written to `run_log.csv` or `state/runs/*.jsonl`, or included in
+error messages (error bodies are redacted of the key values, and every log line is additionally
+scrubbed of the values of `ALPACA_API_KEY`, `ALPACA_SECRET_KEY`, `APCA_API_KEY_ID` and
+`APCA_API_SECRET_KEY`).
 
 ### Paper-only guard
 
@@ -91,6 +95,12 @@ re-checked against the two allowed bases.
   set to the close of the most recent session that closed at least 16 minutes ago (free plans can
   read SIP data older than 15 minutes).
 - **Latest trade / quote / snapshots:** `feed=iex` (`data.latest_feed`).
+- **`scan` ranking snapshots:** `scan.snapshot_feed` (default `iex`); the scan's metrics use the SIP
+  daily bars above.
+- **Rate limits:** the Basic plan allows 200 requests/minute and answers HTTP 429 beyond that.
+  Multi-symbol requests are batched (`scan.batch_size`, 100 symbols); reads retry a 429 up to 5
+  times, waiting until `X-RateLimit-Reset` (Unix seconds) when present, else `Retry-After`, else
+  2/4/8/16/30 s. Order submissions are never retried.
 
 ## Command reference
 
@@ -100,8 +110,11 @@ Exit codes: `0` ok, `1` error, `2` refused by risk checks (`"refused": true` plu
 | Command | Behaviour |
 |---|---|
 | `clock` | Market open/closed, next open/close, trading day?, today's session open/close. |
+| `stamp` | Current time in UK, New York and UTC (no API call). `header` (e.g. `2026-10-01 09:46 New York (EDT) · 14:46 UK (BST) · 13:46 UTC`) heads journal sections; `slack` (`2026-10-01 14:46 UK`) is the Slack status-line time. |
 | `status` | Equity, last equity, day P&L %, cash, buying power, gross exposure %, circuit breaker, entries today (from Alpaca), positions (qty, avg entry, unrealised P&L, days held), open orders. |
 | `screen [--extra SYM,SYM]` | Most-actives ∪ movers (gainers + losers) ∪ extras → universe filters → price, 20-day avg dollar volume, 1d/5d %, SMA20/50, % from 20-day high. |
+| `scan` | Liquid-universe pattern scan (see "Setup scan"): rows flagged `breakout_watch`, `pullback_watch` or `relative_strength`, with SMA20/50 (+ 5-day SMA50 slope), ATR(14), 20-day high, 10-day swing low, close − 1.5/2 × ATR, 20-day return vs SPY, dollar volume; sorted by pattern, then 20-day return vs SPY. |
+| `validate-watchlist` | Today's watchlist: sets `generated_at` (real clock), `reference_price` (latest trade) and `in_zone_at_research`, rewrites the file, validates every candidate (see "Entry zones") and prints all errors plus each candidate's zone, distance to the zone, reward:risk and stop distance at the zone top. Exit 1 if anything fails. |
 | `check SYMBOL` | Universe eligibility with pass/fail per filter; a leveraged exclusion names the symbol-list entry or name pattern (and fund indicator) that matched. |
 | `bars SYMBOL [--days N]` | Daily SIP bars (default 60) through the previous session. |
 | `snapshot SYM[,SYM]` | Latest trade, quote, today's and previous daily bar (IEX). |
@@ -113,16 +126,17 @@ Exit codes: `0` ok, `1` error, `2` refused by risk checks (`"refused": true` plu
 | `stale` | Positions to close now, each with a `reason`: `earnings_exit` (earnings date on or before the next trading day; takes precedence) or `time_stop` (held ≥ `max_hold_days` trading days). |
 | `cancel-stale-entries` | Cancels bot entry parents (`sw-` prefix) that are still completely unfilled. |
 | `reconcile` | Resolves every `open_trades.json` record: cancelled/expired entry → removed; exited → `trades.csv` row (actual fill prices from FILL activities). Exit reason: bracket legs (bracket mode); in fractional mode, the orders behind the sell fills (any stop id recorded over the position's life, or any stop-type order → `stop`; the `close` order → its reason). Flags untracked positions. |
-| `skip SYMBOL --lesson L-xxx` | Appends a lesson-blocked candidate to `skipped.csv`. |
+| `skip SYMBOL --lesson L-xxx` | Appends a lesson-blocked candidate (with its zone) to `skipped.csv`. |
 | `review --days N \| --all [--markdown]` | Portfolio / per-tag / per-source / per-size-factor stats, exit reasons, equity vs SPY, skipped-trade evaluation, open positions. |
 
 ### Risk checks (`enter`)
 
 All limits come from `config.yaml`; every failed check is reported: long-only; market open and ≥15
 min after the open / ≥15 min before the close; circuit breaker; entries today < max (from Alpaca order
-history); symbol in today's valid watchlist; universe; no existing position/order; open positions
-(+ pending entries) + 1 ≤ max; gross exposure; sector exposure; earnings blackout; stop < limit <
-target, stop distance, reward:risk; trigger met; qty > 0 (≥ 1 whole share in bracket mode);
+history); symbol in today's valid watchlist (including the entry-zone rules); universe; no existing
+position/order; open positions (+ pending entries) + 1 ≤ max; gross exposure; sector exposure;
+earnings blackout; stop < limit < target, stop distance and reward:risk at the actual limit price;
+last price inside the entry zone (check `trigger`); qty > 0 (≥ 1 whole share in bracket mode);
 order notional ≥ `min_order_notional`; settled cash (when `simulate_cash_account`); asset
 `fractionable` (fractional mode, via the universe check).
 
@@ -132,6 +146,66 @@ Fractional mode: `qty = raw` rounded down to 9 decimals (Alpaca's maximum precis
 `qty = floor(raw)`. Either way the order is refused if `qty × limit < risk.min_order_notional`.
 `limit = last × (1 + slippage)` rounded to the tick; `client_order_id = sw-YYYYMMDD-SYMBOL-<6 hex>`.
 Submission is never retried.
+
+### Entry zones
+
+Each watchlist candidate has `trigger: {type: zone, low: X, high: Y}` (the old `above`/`below`
+single-price triggers are gone). A trade run enters only while `low ≤ last price ≤ high`, and
+`enter` re-checks it (check `trigger`). The first week showed why: with a single `above` trigger and
+a fixed target, reward:risk stayed ≥ 1.5 only within 0.03–0.37% above the trigger, so even a
+trigger that was crossed would usually have been refused at the next run's price.
+
+`validate-watchlist` (research) and `enter` (via the watchlist check) require, for every candidate:
+
+| Rule | Detail |
+|---|---|
+| Order | `stop < low ≤ high < target` |
+| Width | `entry.zone_min_width_pct ≤ (high − low) / low ≤ entry.zone_max_width_pct` (0.5%–3%) |
+| Reward:risk at the zone top | `(target − L) / (L − stop) ≥ risk.min_reward_to_risk`, with `L = high × (1 + entry_limit_slippage_pct)` rounded to the tick exactly as `enter` rounds its limit |
+| Stop distance at the zone top | `(L − stop) / L ≤ risk.max_stop_distance_pct`, same `L` |
+| Target | `target_basis` ∈ `resistance`, `prior_high`, `measured_move`, `atr_multiple`, plus a one-line `target_note` |
+| Validated | `reference_price` (latest trade when `validate-watchlist` ran) present, and `in_zone_at_research` equal to `low ≤ reference_price ≤ high` |
+
+Reward:risk only falls and stop distance only grows as the entry price rises, so passing at the zone
+top guarantees every price in the zone passes `enter`'s own checks at its actual limit price.
+`enter` still runs all of them.
+
+### Setup scan
+
+`scan` (research run, alongside `screen` and `news`):
+
+1. `GET /v2/assets?status=active&asset_class=us_equity` (one request), filtered to tradable assets on
+   `universe.allowed_exchanges`, fractionable in fractional mode, plain tickers, not in the exclusions
+   file, and not leveraged/inverse/volatility funds (the same `leveraged_match` as `check`).
+2. Multi-symbol snapshots, `scan.batch_size` (100) symbols per request, on `scan.snapshot_feed`.
+   Each symbol's daily bar for the last completed session (`dailyBar` before the open,
+   `prevDailyBar` during the session) gives its price (must be ≥ `universe.min_price`) and dollar
+   volume (close × volume). The top `scan.top_n` (300) by dollar volume are kept.
+3. SIP daily bars (`scan.bars_days`, 70) for those symbols plus SPY, batched the same way; each
+   symbol must still pass the full `check_universe` on them (20-day average dollar volume etc.).
+4. Metrics: SMA20, SMA50 (and its 5-day slope), ATR(14) (simple mean of the last 14 true ranges),
+   20-day high, 10-day swing low, 20-day return and 20-day return minus SPY's.
+5. Flags: `breakout_watch` (close within 3% below the 20-day high, close > SMA50, SMA20 > SMA50);
+   `pullback_watch` (SMA20 > SMA50, close > SMA50, close within 2% of SMA20); `relative_strength`
+   (top decile of 20-day return vs SPY among analysed symbols; ties at the cut-off included).
+   Thresholds live in the `scan` section of `config.yaml`.
+
+Output: one row per (symbol, pattern), sorted by pattern then by 20-day return vs SPY, plus universe
+counts and the number of HTTP requests made. Requests: 1 for assets, one snapshot request per 100
+assets that pass step 1 (a few thousand assets, so a few dozen requests), and about 4 bars requests
+for 300 symbols, which stays under the 200/minute limit; 429s are backed off as above.
+
+### Run logs and timestamps
+
+- **`state/runs/YYYY-MM-DD.jsonl`** (New York date): one JSON line per `trader.py` invocation with
+  `run_id`, `started_at`, `finished_at`, `subcommand`, `args`, `ok`, `exit_code` and the **full**
+  JSON output (`output`). Only `bars`, `screen`, `scan` and `news` outputs longer than 4000
+  characters are cut to 4000 characters, stored as a string with `output_truncated: true` and
+  `output_chars`. Every command's stdout also carries its `run_id`.
+- **`state/run_log.csv`** stays as the index: timestamp, subcommand, args, ok, a 200-character
+  summary and the `run_id` of the matching jsonl line.
+- **`stamp`** gives the real time for journal headers and Slack; `finish_run.sh` appends the real
+  UTC and New York time to every commit. `CLAUDE.md` forbids hand-written times.
 
 ## Order modes
 
@@ -291,8 +365,9 @@ Differences from the original handoff, and why:
     an ETF with `unknown` is rejected (only `n/a` or a date is allowed). "More than N trading days
     away" counts sessions strictly after today up to and including the earnings date.
 13. **Extra test files** `tests/test_watchlist.py` and `tests/test_alpaca_client.py` (paper guard,
-    auth, retry policy, redaction), plus `tests/conftest.py`; `pytest` is listed in
-    `requirements.txt` as a test-only dependency.
+    auth, retry policy, redaction), `tests/test_zones.py`, `tests/test_scan.py` and
+    `tests/test_logging.py`, plus `tests/conftest.py`; `pytest` is listed in `requirements.txt` as
+    a test-only dependency.
 14. **`start_run.sh` commits restorations.** If restoring protected paths changes anything, it is
     committed immediately ("Restore protected paths from main") so `finish_run.sh` can still commit
     `state/` only. It also sets a local git identity if none is configured (merges need one).
@@ -304,8 +379,9 @@ Differences from the original handoff, and why:
     `ULTRASHORT` was added to the patterns because "UltraShort" is no longer caught by `ULTRA`/`SHORT`.
     `check` reports the matching list entry or pattern and the fund indicator under
     `checks.not_leveraged.matched`.
-16. **Skipped-trade evaluation** assumes entry at the trigger price and scans the skip-date bar plus
-    up to `max_hold_days` following bars; unresolved skips are marked at the last close and flagged
+16. **Skipped-trade evaluation** assumes entry at the top of the entry zone (`zone_high`, the worst
+    in-zone price; legacy rows use `trigger_price`) and scans the skip-date bar plus up to
+    `max_hold_days` following bars; unresolved skips are marked at the last close and flagged
     `complete: false` until the window has elapsed.
 17. **Earnings exit.** `stale` lists positions whose earnings date is on or before the next trading
     day with reason `earnings_exit` (precedence over `time_stop`); the trade run closes them with
@@ -361,3 +437,58 @@ Differences from the original handoff, and why:
 28. **Slack protection warning.** `protect` outputs `unprotected`, `breached` and `slack_warning`,
     and a failed `enter` outputs `slack_warning` too. When present, the warning must be the first
     line after the status line of the Slack summary (see `CLAUDE.md`).
+29. **Entry zones replace `above`/`below` triggers.** Watchlist `trigger` is now
+    `{type: zone, low, high}`; `above`/`below` are rejected. New required candidate fields:
+    `target_basis` (`resistance | prior_high | measured_move | atr_multiple`), a one-line
+    `target_note`, and `reference_price` / `in_zone_at_research` (written by `validate-watchlist`).
+    New config section `entry` (`zone_min_width_pct` 0.005, `zone_max_width_pct` 0.03), now required
+    by `load_config`. See "Entry zones".
+30. **Zone rules are enforced by `enter` too**, not only by `validate-watchlist`: the watchlist check
+    applies the same validation, so a candidate that was never validated (no `reference_price`) or
+    fails a zone rule cannot be entered. This only tightens entry.
+31. **Stop distance is checked at the zone-top limit price**, `high × (1 + entry_limit_slippage_pct)`
+    rounded to the tick, rather than at `high` itself. That is what `enter` checks at the top of the
+    zone, so it is the reading that actually guarantees the whole zone is enterable (it is stricter
+    by the slippage only).
+32. **`validate-watchlist` rewrites the watchlist file** with `yaml.safe_dump` (key order kept,
+    comments dropped). A candidate whose latest trade price is unavailable loses any stale
+    `reference_price` / `in_zone_at_research`, so it fails validation. It also prints non-blocking
+    `warnings`: price already inside the zone ("enter now" must be explicit in the thesis), or
+    price above the zone.
+33. **`skipped.csv` columns:** `zone_low` and `zone_high` replace `trigger_price`, which is kept as a
+    trailing legacy column so a header migration never drops old values. `skip` refuses a candidate
+    without a valid zone.
+34. **`open_trades.json` records** also store `zone_low`, `zone_high`, `reference_price` and
+    `target_basis` for later review.
+35. **`scan` command.** New module `lib/scan.py`, new client method `list_assets`
+    (`GET /v2/assets`), new `scan` config section (`top_n`, `bars_days`, `snapshot_feed`,
+    `batch_size`, pattern thresholds). Deviations from the brief:
+    - Fractionable is required only in fractional order mode, as in `check`/`screen`, because a
+      bracket-mode entry does not need it (the default mode is fractional).
+    - The ranking snapshots use `scan.snapshot_feed`, default `iex`, which is known to work on this
+      account. On IEX, the previous session's volume is IEX's share of the volume, so the ranking is a
+      proxy for consolidated dollar volume; every kept symbol is then re-checked on consolidated SIP
+      bars. Alpaca's docs list `delayed_sip` as a snapshot feed, but do not say whether the Basic
+      plan can use it over REST, so it is not the default.
+    - Kept symbols must also pass the full universe check on SIP bars, so `scan` never lists a name
+      that `check` would reject.
+    - ATR(14) is the simple mean of the last 14 true ranges (not Wilder's smoothing).
+    - Each row also carries `close_minus_1_5_atr`, `close_minus_2_atr` and `sma50_slope_5d_pct` to
+      help place ATR-based stops and confirm a rising 50-day SMA.
+36. **Rate limits.** HTTP 429 is no longer in the generic retry set (2 retries); reads get up to 5
+    429 retries, waiting until `X-RateLimit-Reset` (Unix seconds), else `Retry-After`, else
+    2/4/8/16/30 s, capped at 60 s. Network errors and 5xx keep their 2 retries; writes are never
+    retried. `get_snapshots` / `get_daily_bars` take a `batch_size` (default 100), and the client
+    counts its HTTP attempts (`request_count`, reported by `scan`).
+37. **Full run logs.** Every invocation writes its full output to `state/runs/YYYY-MM-DD.jsonl`;
+    `run_log.csv` gains a `run_id` column (header migration as for `trades.csv`) and stays a short
+    index. Only `bars`, `screen`, `scan` and `news` outputs are truncated (4000 characters). Every
+    JSON output gains a `run_id` key. Log lines are scrubbed of the Alpaca key variables' values.
+38. **Real timestamps.** New `stamp` command (no API call); `CLAUDE.md` requires journal headers and
+    Slack times from it and forbids hand-written times. `finish_run.sh` takes a run label and
+    appends the real UTC and New York times (Python `zoneinfo`, falling back to `date`), plus a
+    `Run-Label:` trailer. All four `routines/*.md` were updated accordingly.
+39. **Research routine:** runs `scan`, aims for 3–6 candidates on a normal day (an empty list needs
+    a one-line reason in the journal and Slack), and must get `validate-watchlist` to pass before
+    finishing. The Slack research summary shows each candidate's zone, distance from
+    `reference_price` and `in_zone_at_research`.

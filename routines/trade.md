@@ -10,15 +10,16 @@ Trading run for the paper swing-trading bot. Do not browse the web in this run.
    b. Run `python trader.py targets` and close each listed position with `python trader.py close SYMBOL --reason target`.
    c. For other open positions, close early only if the thesis is clearly broken per CLAUDE.md, using `--reason thesis_broken` and stating why in the journal.
 7. Entries (skip entirely if the circuit breaker is active or there is no watchlist for today):
-   For each candidate not already held or ordered, run `python trader.py snapshot SYMBOL`. If its trigger is met:
+   For each candidate not already held or ordered, run `python trader.py snapshot SYMBOL`. Its trigger is met only if the latest trade price is inside the candidate's entry zone: `trigger.low <= last <= trigger.high`. If it is:
    - If a Confirmed filter lesson blocks it, run `python trader.py skip SYMBOL --lesson "<lesson id>"`.
    - Otherwise run `python trader.py enter SYMBOL --rationale "<why now>"`. If a Confirmed reduce_size lesson applies, add `--size-factor <F>` with that lesson's factor (the smallest if several apply) and name the lesson in the rationale.
+   For a candidate outside its zone, record the last price and its distance to the zone in the journal; do not enter. `enter` re-checks the zone itself.
    In fractional mode `enter` waits up to about a minute for the fill, cancels any unfilled remainder, and places the stop for the filled qty before it returns. Record its `fill` result (filled, partial or cancelled). If `enter` fails with a `slack_warning`, the position could not be protected; report it.
    If a risk check refuses, record the reasons in the journal and move on. Never work around a refusal.
 8. If you placed any entry in step 7, run `python trader.py protect` again as a final check.
-9. Append a timestamped "Trade run" section to state/journal/<today>.md.
-10. Run `bash scripts/finish_run.sh "trade <today> <time>"`.
+9. Run `python trader.py stamp` and append a "Trade run" section to state/journal/<today>.md, headed `## Trade run — <header from stamp>`.
+10. Run `bash scripts/finish_run.sh "trade"`.
 
-Final step (always): post the Trade summary to Slack exactly as described under "Slack summaries" in CLAUDE.md. If any `protect` run or `enter` in this run produced a `slack_warning`, or reported errors, unprotected or breached positions, the first line after the status line must be the warning (e.g. "⚠️ UNPROTECTED: SYMBOL (reason)").
+Final step (always): run `python trader.py stamp` and post the Trade summary to Slack exactly as described under "Slack summaries" in CLAUDE.md, using its `slack` time in the status line. If any `protect` run or `enter` in this run produced a `slack_warning`, or reported errors, unprotected or breached positions, the first line after the status line must be the warning (e.g. "⚠️ UNPROTECTED: SYMBOL (reason)").
 
 Slack: post the run summary ONLY to channel ID <SLACK_CHANNEL_ID>. Never post to any other channel or user.

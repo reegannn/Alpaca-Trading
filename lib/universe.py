@@ -13,6 +13,9 @@ from typing import Any
 
 DOLLAR_VOLUME_LOOKBACK = 20
 
+# Plain US equity tickers (share classes use '.', e.g. BRK.B). Anything else is skipped.
+SYMBOL_PATTERN = re.compile(r"[A-Z][A-Z0-9.\-]{0,9}")
+
 # Used only if config.yaml has no universe.fund_name_indicators.
 DEFAULT_FUND_NAME_INDICATORS = (
     "ETF", "ETFS", "ETN", "ETNS", "ETP", "FUND", "TRUST", "PROSHARES", "DIREXION",

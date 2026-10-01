@@ -52,7 +52,7 @@ if ! git diff --cached --quiet; then
 fi
 
 echo "== seed state/ from templates/"
-mkdir -p state/watchlist state/journal state/weekly
+mkdir -p state/watchlist state/journal state/weekly state/runs
 for f in "${STATE_FILES[@]}"; do
   if [ ! -f "state/$f" ]; then
     cp "templates/$f" "state/$f"
