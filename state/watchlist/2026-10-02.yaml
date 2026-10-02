@@ -1,0 +1,21 @@
+date: 2026-10-02
+generated_at: "2026-10-02T12:15:00Z"
+candidates:
+  - symbol: NVDA
+    asset_type: stock
+    sector: Technology
+    setup_tag: breakout
+    idea_source: screener
+    thesis: "Uptrend intact: price 230 above rising 50-day SMA (217.4) and 20-day SMA (223.2), up from 190 low on 2026-07-29. Consolidating 1.9% under the 20-day high (234.76) and 2.7% under the all-time high 236.54 (2026-05-14). A close/trade through the ATH with volume would be a clean breakout with no overhead supply; the trade is only taken if the trigger is met."
+    catalyst: "Carried from 2026-10-01; AI-chip sector news flow still supportive (Benzinga 2026-10-01/02: AI chip boom, Cantor Overweight/$350 PT, Oracle/Tencent chip-lease report). Prior headlines (Oracle/Tencent $7B AI-chip lease report, Broadcom financing of AI infrastructure per IPO prospectus) and Cantor Fitzgerald reiterating Overweight with $350 PT on 2026-10-01. Earnings not until mid-November."
+    trigger:
+      type: above
+      price: 236.60
+    stop: 221.00                 # below 2026-09-24 swing low (221.09)
+    target: 262.00               # measured move; reward:risk ~1.5 from 237.3 limit
+    earnings_date: 2026-11-17
+    sources:
+      - https://www.sec.gov/Archives/edgar/data/0001045810/000104581026000073/q2fy27pr.htm
+      - https://www.tipranks.com/stocks/nvda/earnings
+      - https://www.benzinga.com/news/26/10/62100360/cantor-fitzgerald-reiterates-overweight-nvidia-maintains-350-price-target
+      - https://www.benzinga.com/markets/tech/26/10/62102026/oracle-lands-7-billion-tencent-ai-deal-chinese-tech-giant-to-access-100000-advanced-chips-through-southeast-asia-data-centers-report
