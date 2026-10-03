@@ -186,3 +186,6 @@ timestamp,subcommand,args,ok,result
 2026-10-02T20:16:59Z,reconcile,reconcile,true,"{""closed_trades"":[],""cancelled_entries"":[],""still_open"":[],""pending_entries"":[],""untracked_positions"":[],""issues"":[]}"
 2026-10-02T20:17:04Z,protect,protect,true,"{""order_mode"":""fractional"",""market_open"":false,""note"":""market closed: new DAY stops are queued by Alpaca for the next session"",""counts"":{},""results"":[],""flagged"":[],""breached"":[],""unprotected"":[],""..."
 2026-10-02T20:17:25Z,status,status,true,"{""order_mode"":""fractional"",""market_open"":false,""equity"":300.0,""last_equity"":300.0,""day_pnl"":0.0,""day_pnl_pct"":0.0,""cash"":300.0,""buying_power"":300.0,""simulate_cash_account"":true,""settled_cash_availa..."
+2026-10-03T09:13:56Z,clock,clock --pretty,true,"{""now_utc"":""2026-10-03T09:13:55Z"",""now_new_york"":""2026-10-03T05:13:55-04:00"",""today"":""2026-10-03"",""is_open"":false,""next_open"":""2026-10-05T09:30:00-04:00"",""next_close"":""2026-10-05T16:00:00-04:00"",""i..."
+2026-10-03T09:14:00Z,review,review --days 7 --markdown,true,markdown report
+2026-10-03T09:14:01Z,review,review --all --markdown,true,markdown report
