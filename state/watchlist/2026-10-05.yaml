@@ -1,0 +1,21 @@
+date: 2026-10-05
+generated_at: "2026-10-05T12:20:00Z"
+candidates:
+  - symbol: NVDA
+    asset_type: stock
+    sector: Technology
+    setup_tag: breakout
+    idea_source: screener
+    thesis: "Uptrend intact: close 233.95 above rising 50-day SMA (218.3) and 20-day SMA (223.8). Printed a new all-time high 237.88 on 2026-10-02 then faded; a trade back through that high clears all overhead supply. Stop goes under the 2026-09-29 higher swing low (227.03); target 260 is below the ~269 measured move of the Aug–Oct range (207–238). Only taken if the trigger is met."
+    catalyst: "AI-chip demand news flow still supportive (Cantor Overweight/$350 PT reiterated 2026-10-01; Oracle/Tencent AI-chip lease report). FT 2026-10-05 reports a lawsuit over the Groq licensing deal: noted, not thesis-breaking. Earnings mid-November, outside the hold window."
+    trigger:
+      type: above
+      price: 237.90
+    stop: 226.80                 # below 2026-09-29 swing low (227.025)
+    target: 260.00               # measured move; R:R ~1.81 from 238.61 limit, stop distance ~4.95%
+    earnings_date: 2026-11-17    # sources disagree (11-17 / 11-18 TBC); earlier date used conservatively
+    sources:
+      - https://www.sec.gov/Archives/edgar/data/0001045810/000104581026000073/q2fy27pr.htm
+      - https://www.wallstreethorizon.com/nvidia-earnings-calendar
+      - https://www.tipranks.com/stocks/nvda/earnings
+      - https://www.benzinga.com/news/26/10/62100360/cantor-fitzgerald-reiterates-overweight-nvidia-maintains-350-price-target
