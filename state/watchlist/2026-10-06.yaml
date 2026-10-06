@@ -1,0 +1,21 @@
+date: 2026-10-06
+generated_at: "2026-10-06T12:25:00Z"
+candidates:
+  - symbol: NVDA
+    asset_type: stock
+    sector: Technology
+    setup_tag: breakout
+    idea_source: screener
+    thesis: "Uptrend intact: close 238.90 above rising 50-day SMA (218.9) and 20-day SMA (224.2). Broke out of the late-Sep 228-233 range on 2026-10-02 and printed a new all-time high 240.10 on 2026-10-05. Enter only on a trade through that high (no overhead supply). Stop sits under the 10-02 breakout-day low (233.60) and the old range top (233.21), so a close back inside the range breaks the thesis. Target 260 is short of the ~269 measured move of the Aug-Oct range."
+    catalyst: "AI-chip demand news flow still supportive (Nasdaq 100 at a record on 10-05; Cantor Overweight/$350 PT reiterated 10-01). Groq-deal shareholder lawsuit (CNBC/FT 10-05) noted, not thesis-breaking. Earnings 11-17/11-18 (TBC), well outside the hold window."
+    trigger:
+      type: above
+      price: 240.15
+    stop: 231.90                 # below 10-02 breakout-day low 233.60 and old range top 233.21
+    target: 260.00               # measured move; R:R ~2.13 from 240.87 limit, stop distance ~3.7%
+    earnings_date: 2026-11-17    # sources say 11-18 (TBC); earlier date used conservatively
+    sources:
+      - https://www.sec.gov/Archives/edgar/data/0001045810/000104581026000073/q2fy27pr.htm
+      - https://www.wallstreethorizon.com/nvidia-earnings-calendar
+      - https://www.benzinga.com/news/26/10/62100360/cantor-fitzgerald-reiterates-overweight-nvidia-maintains-350-price-target
+      - https://www.benzinga.com/markets/market-summary/26/10/62170436/nasdaq-100-record-brazil-etf-ewz-soars-bolsonaro-ism-services-prices-stock-market-today
