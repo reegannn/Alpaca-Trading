@@ -1,1 +1,2 @@
 client_order_id,symbol,sector,setup_tag,idea_source,entry_time,entry_price,qty,stop,target,exit_time,exit_price,exit_reason,r_multiple,pnl,days_held,rationale,size_factor
+sw-20261006-NVDA-3e9634,NVDA,Technology,breakout,screener,2026-10-06T13:47:46Z,241.754,0.283019,231.9,260,2026-10-08T17:01:01Z,231.904,stop,-1,-2.79,2,"Breakout above 240.15 trigger (prior ATH 240.10), uptrend intact above rising 20/50 SMA, stop 231.90 below breakout-day low, target 260 measured move",1
