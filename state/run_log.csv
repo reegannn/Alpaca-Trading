@@ -390,3 +390,8 @@ timestamp,subcommand,args,ok,result
 2026-10-09T16:50:54Z,status,status,true,"{""order_mode"":""fractional"",""market_open"":true,""equity"":297.18,""last_equity"":297.18,""day_pnl"":0.0,""day_pnl_pct"":0.0,""cash"":297.18,""buying_power"":297.18,""simulate_cash_account"":true,""settled_cash_ava..."
 2026-10-09T16:51:14Z,stale,stale,true,"{""max_hold_days"":10,""stale"":[],""days_held_unknown"":[],""note"":""Close each stale position with `close SYMBOL --reason <reason>`.""}"
 2026-10-09T16:51:14Z,targets,targets,true,"{""order_mode"":""fractional"",""targets"":[],""untracked_positions"":[],""note"":""Close each with `close SYMBOL --reason target`. Targets are only checked when this command runs.""}"
+2026-10-10T09:13:33Z,clock,clock --pretty,false,No module named 'requests'
+2026-10-10T09:13:43Z,clock,clock,false,No module named 'requests'
+2026-10-10T09:13:50Z,clock,clock,true,"{""now_utc"":""2026-10-10T09:13:50Z"",""now_new_york"":""2026-10-10T05:13:50-04:00"",""today"":""2026-10-10"",""is_open"":false,""next_open"":""2026-10-12T09:30:00-04:00"",""next_close"":""2026-10-12T16:00:00-04:00"",""i..."
+2026-10-10T09:13:55Z,review,review --days 7 --markdown,true,markdown report
+2026-10-10T09:13:56Z,review,review --all --markdown,true,markdown report
